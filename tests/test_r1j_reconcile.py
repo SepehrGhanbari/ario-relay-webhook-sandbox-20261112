@@ -1,6 +1,7 @@
 """R1j mock-only adversarial tests. Never issues GitHub writes or reads secrets."""
 from dataclasses import replace
 import copy
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest

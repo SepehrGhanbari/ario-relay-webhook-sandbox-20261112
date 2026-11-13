@@ -215,12 +215,20 @@ def reconcile(caller: Callable, intent: Intent, observations: int = 3) -> dict:
                     return outcome("CONFLICT_HOLD", "CHECK_IDENTITY_MISMATCH")
                 if direct is not None and c.get("id") != direct.get("id"):
                     return outcome("CONFLICT_HOLD", "CHECK_ID_LIST_CONFLICT")
+                # An older Check can be valid even after the PR has moved.
+                # Re-read PR immediately before returning confirmation.
+                latest_pr = caller("GET", f"/repos/{REPO}/pulls/{intent.pr_number}")
+                validate_current_pr(latest_pr, intent)
                 return outcome("CONFIRMED_EXISTING_CHECK", "EXACT_APP_SHA_EXTERNAL_ID",
                                c["id"])
             last_unknown = "NO_CHECK_VISIBLE_YET"
         except EvidenceError as exc:
             # A definite contradictory direct check must not silently heal.
             if str(exc) in ("CHECK_ID_CONFLICT",):
+                return outcome("CONFLICT_HOLD", str(exc))
+            if str(exc) == "STALE_PR_HEAD_OR_BASE":
+                return outcome("STALE_PR_HOLD", str(exc))
+            if str(exc) in ("PR_STATE", "PR_REPO", "PR_REFS"):
                 return outcome("CONFLICT_HOLD", str(exc))
             last_unknown = str(exc)
         except Exception:

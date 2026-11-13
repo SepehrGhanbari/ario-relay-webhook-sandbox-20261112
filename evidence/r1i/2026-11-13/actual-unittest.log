@@ -1,0 +1,7 @@
+$ python3 -I -B -m unittest discover -s tests -p test_reference.py -v
+test_registered_positive (test_reference.DisposableReferenceControl.test_registered_positive) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.000s
+
+OK

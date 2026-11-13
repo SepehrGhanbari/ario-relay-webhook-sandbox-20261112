@@ -1,0 +1,33 @@
+name: R1l shared SQLite coordinator live subprocess and network fault tests
+on:
+  push:
+    branches:
+      - experiment/r1l-atomic-shared-coordinator-20261113
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: r1l-linux-atomic-claims-crash-recovery
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout isolated test source, no credential persistence
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Execute networked-process and SQLite fault injection
+        run: python3 -B -m unittest discover -s tests -p 'test_r1l_*.py' -v
+
+  windows:
+    name: r1l-windows-atomic-claims-crash-recovery
+    runs-on: windows-2025
+    timeout-minutes: 12
+    steps:
+      - name: Checkout isolated test source, no credential persistence
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Execute networked-process and SQLite fault injection
+        run: python -B -m unittest discover -s tests -p 'test_r1l_*.py' -v

@@ -213,5 +213,46 @@ class R1eRaceTests(unittest.TestCase):
                          ['GET', 'GET', 'GET'])
 
 
+class R1fPayloadGuardTests(unittest.TestCase):
+    """Regression: a malformed payload must HOLD before any token/POST."""
+
+    def reject(self, field: str, value, reason: str):
+        payload = failure_payload(10, HEAD, BASE)
+        if field == 'output':
+            payload['output'] = value
+        else:
+            payload[field] = value
+        client = Caller([pr()])
+        with patch('publisher.failure_payload', return_value=payload):
+            with self.assertRaisesRegex(GateHold, reason):
+                execute(number=10, head=HEAD, base=BASE, live=True,
+                        caller=client, config={'repo': TARGET_REPO})
+        self.assertEqual([method for method, _, _ in client.calls], ['GET'])
+
+    def test_24_neutral_must_hold(self):
+        self.reject('conclusion', 'neutral', 'PUBLISH_NOT_FAILURE')
+
+    def test_25_skipped_must_hold(self):
+        self.reject('conclusion', 'skipped', 'PUBLISH_NOT_FAILURE')
+
+    def test_26_success_must_hold(self):
+        self.reject('conclusion', 'success', 'PUBLISH_NOT_FAILURE')
+
+    def test_27_wrong_head_must_hold(self):
+        self.reject('head_sha', 'c'*40, 'PUBLISH_SHA_MISMATCH')
+
+    def test_28_wrong_external_id_must_hold(self):
+        self.reject('external_id', 'R1D-LAB-HOLD:forged', 'PUBLISH_EVIDENCE_BINDING_MISMATCH')
+
+    def test_29_missing_hold_title_must_hold(self):
+        self.reject('output', {'title': 'Approval'}, 'PUBLISH_HOLD_TITLE_MISSING')
+
+    def test_30_wrong_check_name_must_hold(self):
+        self.reject('name', 'made-up-check', 'PUBLISH_CHECK_NAME_MISMATCH')
+
+    def test_31_noncompleted_must_hold(self):
+        self.reject('status', 'queued', 'PUBLISH_STATUS_NOT_COMPLETED')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -1,0 +1,21 @@
+name: R1h offline positive-evidence policy PROTOTYPE (NOT TRUSTED)
+on:
+  push:
+    branches:
+      - experiment/r1h-independent-positive-control-design-20261113
+
+permissions:
+  contents: read
+
+jobs:
+  offline-design-tests:
+    name: r1h-offline-evidence-review-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout disposable design branch without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Check mocked evidence contract only
+        run: python3 -B -m unittest discover -s tests -p 'test_r1h_*.py' -v

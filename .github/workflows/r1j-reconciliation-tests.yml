@@ -1,0 +1,21 @@
+name: R1j no-repost reconciliation offline adversarial tests
+on:
+  push:
+    branches:
+      - experiment/r1j-check-post-outcome-reconciliation-20261113
+
+permissions:
+  contents: read
+
+jobs:
+  r1j-negative-tests:
+    name: r1j-check-readback-negative-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout only disposable sandbox source without persistent credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Execute fail-closed mock-only test suite
+        run: python3 -I -B -m unittest discover -s tests -p 'test_r1j_*.py' -v

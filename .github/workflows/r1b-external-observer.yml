@@ -1,0 +1,27 @@
+name: R1b outside-PR observer (expected HOLD)
+
+on:
+  push:
+    branches:
+      - experiment/r1b-external-observer-20261113
+
+# Runs only the pinned observer from THIS repository, not files from the
+# target PR. This is NOT an independent GitHub App check producer.
+permissions:
+  contents: read
+
+jobs:
+  r1b-observer:
+    name: r1b-off-pr-observer
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout observer repository, not the untrusted PR
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Verify frozen observer bytes
+        run: |
+          python3 -c "import pathlib,hashlib; p=pathlib.Path('external_auditor_v02.py'); h=hashlib.sha256(p.read_bytes()).hexdigest(); print('PINNED_EXECUTOR_SHA256='+h); assert h == '1a293c6b5d14521cdc26d03bea15f0ba81dd21d6ba3642b5ac4f7dc2382f6d5d', 'EXECUTOR_HASH_MISMATCH'"
+      - name: Read GitHub directly and preserve HOLD as failure
+        run: python3 -B external_auditor_v02.py

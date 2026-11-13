@@ -177,5 +177,41 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(result, 2)
 
 
+
+class R1eRaceTests(unittest.TestCase):
+    """Mock-only HEAD/base drift controls; no live check or trusted key."""
+
+    def test_21_head_changes_on_final_pre_publish_read(self):
+        drift = pr(head={'sha': 'c'*40, 'repo': {'full_name': TARGET_REPO}})
+        client = Caller([pr(), pr(), drift])
+        with patch('publisher.get_installation_token', return_value='MOCK_TOKEN'):
+            with self.assertRaisesRegex(GateHold, 'HEAD_OR_BASE_DRIFT'):
+                execute(number=10, head=HEAD, base=BASE, live=True,
+                        caller=client, config={'repo': TARGET_REPO})
+        self.assertEqual([method for method, _, _ in client.calls],
+                         ['GET', 'GET', 'GET'])
+
+    def test_22_base_changes_on_final_pre_publish_read(self):
+        drift = pr(base={'sha': 'd'*40, 'ref': 'main',
+                         'repo': {'full_name': TARGET_REPO}})
+        client = Caller([pr(), pr(), drift])
+        with patch('publisher.get_installation_token', return_value='MOCK_TOKEN'):
+            with self.assertRaisesRegex(GateHold, 'HEAD_OR_BASE_DRIFT'):
+                execute(number=10, head=HEAD, base=BASE, live=True,
+                        caller=client, config={'repo': TARGET_REPO})
+        self.assertEqual([method for method, _, _ in client.calls],
+                         ['GET', 'GET', 'GET'])
+
+    def test_23_metadata_changes_on_final_pre_publish_read(self):
+        drift = pr(updated_at='2026-11-13T19:00:00Z')
+        client = Caller([pr(), pr(), drift])
+        with patch('publisher.get_installation_token', return_value='MOCK_TOKEN'):
+            with self.assertRaisesRegex(GateHold, 'PR_CHANGED_BEFORE_CHECK_PUBLISH'):
+                execute(number=10, head=HEAD, base=BASE, live=True,
+                        caller=client, config={'repo': TARGET_REPO})
+        self.assertEqual([method for method, _, _ in client.calls],
+                         ['GET', 'GET', 'GET'])
+
+
 if __name__ == '__main__':
     unittest.main()

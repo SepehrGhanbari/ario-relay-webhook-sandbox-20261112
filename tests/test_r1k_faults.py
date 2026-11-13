@@ -271,6 +271,55 @@ class R1kFaults(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), original)
                 self.assert_hold(recover_existing_intent(path, expected()))
 
+    def test_19_two_disjoint_host_journals_both_claim_proves_no_global_lock(self):
+        """Adversarial negative result: local O_EXCL cannot prevent multi-host duplicates.
+
+        DO NOT publish a Check in this probe. Both records are only local intents.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            first = Path(directory) / "hostA"
+            second = Path(directory) / "hostB"
+            first.mkdir()
+            second.mkdir()
+            a = run_worker(first / "intent.json")
+            b = run_worker(second / "intent.json")
+            self.assertEqual((a.returncode, b.returncode), (0, 0))
+            for path in (first / "intent.json", second / "intent.json"):
+                report = recover_existing_intent(path, expected())
+                self.assertEqual(report["verdict"], "RECOVERED_POST_OUTCOME_UNKNOWN_HOLD")
+                self.assert_hold(report)
+            # This is a documented *failure* of cross-host mutual exclusion,
+            # not evidence that two GitHub Check POSTs actually took place.
+
+    def test_20_torn_marker_blocks_multiple_simultaneous_restarters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "intent.json"
+            crash = run_worker(path, "die_mid_write")
+            self.assertEqual(crash.returncode, 74)
+            original = path.read_bytes()
+            go = Path(directory) / "go"
+            children = [subprocess.Popen(worker(path, barrier=go), cwd=ROOT,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                        for _ in range(6)]
+            try:
+                time.sleep(0.3)
+                go.write_text("go\n")
+                results = [p.communicate(timeout=25) for p in children]
+                self.assertTrue(all(p.returncode == 20 for p in children),
+                                list(zip([p.returncode for p in children], results)))
+                self.assertEqual(path.read_bytes(), original)
+                self.assertEqual(recover_existing_intent(path, expected())["verdict"],
+                                 "UNKNOWN_HOLD")
+            finally:
+                for p in children:
+                    if p.poll() is None:
+                        p.kill()
+                    if p.stdout:
+                        p.stdout.close()
+                    if p.stderr:
+                        p.stderr.close()
+                    p.wait(timeout=10)
+
 
 if __name__ == "__main__":
     unittest.main()

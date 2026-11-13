@@ -123,9 +123,9 @@ def candidate_state(run: dict, i: Intent) -> str:
         return "UNRELATED"
     if type(run.get("id")) is not int or run["id"] <= 0:
         return "CONFLICT"
-    if run.get("name") != i.name or run.get("head_sha") != i.head_sha or
+    if (run.get("name") != i.name or run.get("head_sha") != i.head_sha or
             run.get("status") != "completed" or run.get("conclusion") != i.conclusion or
-            (run.get("app") or {}).get("id") != i.app_id:
+            (run.get("app") or {}).get("id") != i.app_id):
         return "CONFLICT"
     if i.returned_check_id is not None and run["id"] != i.returned_check_id:
         return "CONFLICT"

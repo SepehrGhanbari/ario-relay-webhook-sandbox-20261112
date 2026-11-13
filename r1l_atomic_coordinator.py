@@ -88,25 +88,29 @@ class Store:
             raise RuntimeError("INVALID_DB_PARENT_OR_SYMLINK")
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         os.close(fd)
+        db = None
         try:
-            with sqlite3.connect(str(path)) as db:
-                db.execute("PRAGMA journal_mode=WAL")
-                db.execute("PRAGMA synchronous=FULL")
-                db.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-                db.execute("INSERT INTO metadata VALUES ('deployment', ?)", (DEPLOYMENT,))
-                db.execute("""CREATE TABLE claims (
-                    repo TEXT NOT NULL, app_id INTEGER NOT NULL,
-                    check_name TEXT NOT NULL, pr_number INTEGER NOT NULL,
-                    head_sha TEXT NOT NULL, base_sha TEXT NOT NULL,
-                    external_id TEXT NOT NULL, evidence_sha256 TEXT NOT NULL,
-                    state TEXT NOT NULL CHECK(state='CLAIMED_UNKNOWN'),
-                    PRIMARY KEY (repo, app_id, check_name, pr_number, head_sha),
-                    UNIQUE (repo, app_id, check_name, external_id)
-                )""")
-                db.commit()
+            db = sqlite3.connect(str(path))
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute("PRAGMA synchronous=FULL")
+            db.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            db.execute("INSERT INTO metadata VALUES ('deployment', ?)", (DEPLOYMENT,))
+            db.execute("""CREATE TABLE claims (
+                repo TEXT NOT NULL, app_id INTEGER NOT NULL,
+                check_name TEXT NOT NULL, pr_number INTEGER NOT NULL,
+                head_sha TEXT NOT NULL, base_sha TEXT NOT NULL,
+                external_id TEXT NOT NULL, evidence_sha256 TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state='CLAIMED_UNKNOWN'),
+                PRIMARY KEY (repo, app_id, check_name, pr_number, head_sha),
+                UNIQUE (repo, app_id, check_name, external_id)
+            )""")
+            db.commit()
         except BaseException:
             # Keep a failed bootstrap file as a tombstone: never silently reset.
             raise
+        finally:
+            if db is not None:
+                db.close()
 
     @staticmethod
     def _validate_db(db) -> None:
@@ -117,13 +121,21 @@ class Store:
     def verify_existing(self) -> None:
         if not self.path.is_file() or self.path.is_symlink():
             raise RuntimeError("DB_MISSING_OR_SYMLINK_NO_AUTOMATIC_BOOTSTRAP")
-        with self._conn() as db:
+        # Fail closed on physical primary-file damage, even if a remaining WAL
+        # could cause SQLite to rebuild. No automatic restore/recreate is allowed.
+        with self.path.open("rb") as source:
+            if source.read(16) != b"SQLite format 3\\x00":
+                raise RuntimeError("PRIMARY_DB_HEADER_CORRUPT_HOLD")
+        db = self._conn()
+        try:
             self._validate_db(db)
             ok = db.execute("PRAGMA integrity_check").fetchone()
             if ok != ("ok",):
                 raise RuntimeError("DB_INTEGRITY_FAILURE")
             # Validate schema present without inserting or deleting claims.
             db.execute("SELECT 1 FROM claims LIMIT 1").fetchone()
+        finally:
+            db.close()
 
     def reserve(self, intent: dict) -> dict:
         if not valid_intent(intent):

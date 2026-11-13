@@ -33,3 +33,16 @@ GitHub documents separate APIs to [create a check run](https://docs.github.com/e
 - The R1i real accepted Check was still only for one harmless fixture, **not** the full Ario suite; App-authored `neutral/skipped`, races with base updates, review evidence retention and external signing-service compromise remain under test.
 
 **Verdict: R1j is laboratory research only.** Main `SepehrGhanbari/Ario` and its Rulesets are untouched; production PRs #133/#151 remain HOLD and permanent Trust/key activation remains NO_GO.
+
+
+## R1j cross-platform and rate-limit addendum (same day; append-only)
+
+After the initial 30 tests passed, adversarial review found an additional time-of-check/time-of-use race: HEAD/base could change **during** check-list retrieval. The reconciler now makes a **second final live PR read** just before returning `CONFIRMED_EXISTING_CHECK`. Two new mock tests, #31 and #32, force a changed HEAD or Base between the first and final PR read and require `STALE_PR_HOLD`.
+
+The 32-case suite is now exercised independently on both **Ubuntu Linux** and **Windows 2025** GitHub Actions runners, without credentials. The Windows run specifically exercises creation and exclusive re-creation refusal of the local one-shot journal. Windows CI is not proof of native Windows 10 ACL correctness, multi-process isolation or distributed locking.
+
+The live public-GET-only R1i replay **did** succeed at [run 43490882138](https://github.com/SepehrGhanbari/ario-relay-webhook-sandbox-20261112/actions/runs/43490882138), returning `STALE_PR_HOLD` after reading the historic genuine App 5747504 SUCCESS and current HEAD B. Later, repeated public GETs at [run 43491545427](https://github.com/SepehrGhanbari/ario-relay-webhook-sandbox-20261112/actions/runs/43491545427) encountered GitHub's `HTTP 403 rate limit exceeded` **after 32/32 mock tests passed**, not a security-gate acceptance. The successful live observation and this rate-limit failure are both retained.
+
+To prevent a monitoring outage or public GitHub API quota from blocking every code update, the push-triggered CI now runs **offline Linux + Windows tests only**. The real read-only replay source is kept in the PR and the previous successful hosted artifact remains available; further live replay would need an independently rate-bounded, authorized workflow. This change does not add any publication permission.
+
+The final correctness claim remains bounded: R1j prototype and cross-platform tests improve fail-closed behavior but are **not deployed as a new GitHub App publisher** and cannot eliminate race windows at GitHub's ultimate merge decision. Independent custody, actual restart/crash tests, multi-host lock, full Ario test suite and complete governance authorization are still **HOLD**.

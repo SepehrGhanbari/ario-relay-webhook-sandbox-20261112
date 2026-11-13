@@ -168,10 +168,10 @@ class R1jNoRepostReconciliationTests(unittest.TestCase):
         unrelated = [check(id=i+10, external_id="unrelated-"+str(i)) for i in range(100)]
         class PagedFake(FakeAPI):
             def __call__(self, method, url, **kw):
-                if "page=1" in url:
+                if "&page=1" in url:
                     self.calls.append((method,url))
                     return {"total_count": 101, "check_runs": copy.deepcopy(unrelated)}
-                if "page=2" in url:
+                if "&page=2" in url:
                     self.calls.append((method,url))
                     return {"total_count": 101, "check_runs": [check()]}
                 return super().__call__(method,url,**kw)

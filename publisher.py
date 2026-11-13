@@ -90,6 +90,25 @@ def failure_payload(number: int, head: str, base: str) -> dict:
     }
 
 
+
+def enforce_failure_only_payload(payload: dict, number: int, head: str, base: str) -> None:
+    """Defense in depth: never send a green/neutral/skipped lab check.
+
+    This is not merge authorization or evidence of independent verification.
+    It guards against a future accidental change to failure_payload().
+    """
+    require(type(payload) is dict, 'PUBLISH_PAYLOAD_NOT_OBJECT')
+    require(payload.get('name') == CHECK_NAME, 'PUBLISH_CHECK_NAME_MISMATCH')
+    require(payload.get('head_sha') == head, 'PUBLISH_SHA_MISMATCH')
+    require(payload.get('status') == 'completed', 'PUBLISH_STATUS_NOT_COMPLETED')
+    require(payload.get('conclusion') == 'failure', 'PUBLISH_NOT_FAILURE')
+    expected_id = f'R1D-LAB-HOLD:PR-{number}:{head}:{base}'
+    require(payload.get('external_id') == expected_id, 'PUBLISH_EVIDENCE_BINDING_MISMATCH')
+    output = payload.get('output')
+    require(type(output) is dict and type(output.get('title')) is str and
+            output['title'].startswith('HOLD'), 'PUBLISH_HOLD_TITLE_MISSING')
+
+
 def signed_jwt(app_id: str, private_key: bytes, now: int) -> str:
     """RS256 JWT with short expiry. PyJWT/cryptography imported only in live mode."""
     require(app_id.isdecimal() and int(app_id) > 0, 'INVALID_APP_ID')
@@ -134,6 +153,7 @@ def execute(*, number: int, head: str, base: str, live: bool, caller=api,
     pr = caller('GET', f'/repos/{TARGET_REPO}/pulls/{number}')
     preflight(pr, number, head, base)
     payload = failure_payload(number, head, base)
+    enforce_failure_only_payload(payload, number, head, base)
     latest = caller('GET', f'/repos/{TARGET_REPO}/pulls/{number}')
     preflight(latest, number, head, base)
     require((pr.get('updated_at'), pr.get('draft'), pr.get('state')) ==

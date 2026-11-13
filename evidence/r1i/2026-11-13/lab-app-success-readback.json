@@ -1,0 +1,14 @@
+{
+  "scope": "LAB_ONLY",
+  "check_run_id": 132094820201,
+  "head_sha": "508a6abfacf534fa01a4b97210c35b35ca965c86",
+  "app_id": 5747504,
+  "name": "ario-r1d-lab-app-gate",
+  "conclusion": "success",
+  "external_run_id": 43484108692,
+  "signed_evidence_pubkey_sha256": "b4aa27898fa77b977c7ae1d46c7a1274eb5a1aa5858548a70f1355dbd6da2e19",
+  "initial_publisher_outcome": "HOLD_CHECK_RUN_READBACK_MISMATCH",
+  "observed_afterward": "GitHub REST confirms existing completed success, exact SHA, App 5747504",
+  "duplicate_post_performed": false,
+  "production_governance_approved": false
+}

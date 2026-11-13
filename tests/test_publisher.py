@@ -1,5 +1,7 @@
 """Offline negative controls. Never contacts GitHub or generates a real token."""
 from dataclasses import replace
+from contextlib import redirect_stdout, redirect_stderr
+import io
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 import unittest
@@ -103,7 +105,7 @@ class PublisherTests(unittest.TestCase):
 
     def test_14_no_success_mode_in_cli(self):
         from publisher import main
-        with self.assertRaises(SystemExit) as cm:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
             main(['--approve', '--pr', '10', '--head', HEAD, '--base', BASE])
         self.assertEqual(cm.exception.code, 2)
 
@@ -156,6 +158,23 @@ class PublisherTests(unittest.TestCase):
                 with self.assertRaisesRegex(GateHold, 'APP_IDENTITY_MISMATCH'):
                     get_installation_token('4321', '777', str(key), client)
             self.assertEqual(len(client.calls), 1)
+
+    def test_19_dry_run_hold_has_nonzero_process_exit(self):
+        from publisher import main
+        with patch('publisher.execute', return_value={'mode': 'DRY_RUN',
+                                                       'verdict': 'HOLD', 'published': False}):
+            with redirect_stdout(io.StringIO()):
+                result = main(['--pr', '10', '--head', HEAD, '--base', BASE])
+        self.assertEqual(result, 2)
+
+    def test_20_live_fail_only_has_nonzero_process_exit(self):
+        from publisher import main
+        with patch('publisher.execute', return_value={'mode': 'LIVE_FAILURE_ONLY',
+                                                       'verdict': 'HOLD', 'published': True}):
+            with redirect_stdout(io.StringIO()):
+                result = main(['--pr', '10', '--head', HEAD, '--base', BASE,
+                               '--publish-failure'])
+        self.assertEqual(result, 2)
 
 
 if __name__ == '__main__':

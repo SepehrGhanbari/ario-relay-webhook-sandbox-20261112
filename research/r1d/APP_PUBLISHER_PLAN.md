@@ -32,7 +32,7 @@ python publisher.py --pr 10 \
   --base be7c16d964872f88ddb9029f2677c49a7cd745ba
 ```
 
-The default is `DRY_RUN`, producing a JSON payload but **no Check Run**. An out-of-date SHA causes `HOLD`, not silent refreshing of an untrusted PR. This requires a network-capable trusted operator machine.
+The default is `DRY_RUN`, producing a JSON payload but **no Check Run**. Even a dry-run HOLD **exits nonzero (code 2)** so a CI runner cannot mistake it for a passed check. An out-of-date SHA causes `HOLD`, not silent refreshing of an untrusted PR. This requires a network-capable trusted operator machine.
 
 ## Live failure-only publication (NOT YET ENABLED)
 

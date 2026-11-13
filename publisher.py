@@ -178,7 +178,7 @@ def main(argv=None) -> int:
         result = execute(number=args.pr, head=args.head, base=args.base,
                          live=args.publish_failure, config=config)
         print(json.dumps(result, sort_keys=True))
-        return 0 if result['mode'] == 'DRY_RUN' else 2  # HOLD always nonzero in live mode
+        return 2  # HOLD ALWAYS exits nonzero, even in dry-run. No green-on-HOLD path.
     except (GateHold, OSError, ValueError) as exc:
         reason = str(exc) if isinstance(exc, GateHold) else type(exc).__name__
         print(json.dumps({'verdict': 'HOLD', 'reason': reason, 'published': False}))

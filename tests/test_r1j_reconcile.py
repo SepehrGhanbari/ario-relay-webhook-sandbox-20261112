@@ -245,6 +245,18 @@ class R1jNoRepostReconciliationTests(unittest.TestCase):
         out = self.guard(api)
         self.assertEqual(out["check_run_id"], 132094820201)
 
+    def test_31_head_changes_between_scan_and_confirmation(self):
+        changed = pr(head={"sha": "d"*40, "repo": {"full_name": REPO}})
+        api = FakeAPI(prs=[pr(), changed])
+        self.guard(api, "STALE_PR_HOLD")
+        self.assertEqual(api.pr_reads, 2)
+
+    def test_32_base_changes_between_scan_and_confirmation(self):
+        changed = pr(base={"sha": "e"*40, "repo": {"full_name": REPO}})
+        api = FakeAPI(prs=[pr(), changed])
+        self.guard(api, "STALE_PR_HOLD")
+        self.assertEqual(api.pr_reads, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

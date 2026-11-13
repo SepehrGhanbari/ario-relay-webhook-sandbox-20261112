@@ -19,3 +19,13 @@ jobs:
           persist-credentials: false
       - name: Execute fail-closed mock-only test suite
         run: python3 -B -m unittest discover -s tests -p 'test_r1j_*.py' -v
+      - name: Independently re-read stale trusted-App success and current HEAD (public GET only)
+        run: python3 -B r1j_live_readonly.py
+      - name: Retain read-only replay observation
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: r1j-readonly-replay-${{ github.run_id }}
+          path: r1j-evidence/
+          if-no-files-found: warn
+          retention-days: 30

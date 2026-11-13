@@ -1,0 +1,98 @@
+name: R1m independent Linux Windows runners race GitHub test ref CAS
+on:
+  push:
+    branches:
+      - experiment/r1m-independent-hosts-github-ref-cas-20261113
+
+jobs:
+  linux:
+    name: r1m-linux-independent-github-ref-claim
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    outputs:
+      baseline_result: ${{ steps.cas.outputs.baseline_result }}
+      lostreply_result: ${{ steps.cas.outputs.lostreply_result }}
+    steps:
+      - name: Checkout sandbox without credential persistence
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Run 21 offline identity and fail-closed probe tests
+        run: python3 -B -m unittest discover -s tests -p 'test_r1m_*.py' -v
+      - name: One-shot CAS claims in disposable Git tag namespace only
+        id: cas
+        env:
+          R1M_ROLE: linux
+          R1M_GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -B r1m_github_ref_cas.py
+      - name: Archive unsigned research witness
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: r1m-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: r1m-evidence/linux.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  windows:
+    name: r1m-windows-independent-github-ref-claim
+    runs-on: windows-2025
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    outputs:
+      baseline_result: ${{ steps.cas.outputs.baseline_result }}
+      lostreply_result: ${{ steps.cas.outputs.lostreply_result }}
+    steps:
+      - name: Checkout sandbox without credential persistence
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Run 21 offline identity and fail-closed probe tests
+        run: python -B -m unittest discover -s tests -p 'test_r1m_*.py' -v
+      - name: One-shot CAS claims in disposable Git tag namespace only
+        id: cas
+        env:
+          R1M_ROLE: windows
+          R1M_GITHUB_TOKEN: ${{ github.token }}
+        run: python -B r1m_github_ref_cas.py
+      - name: Archive unsigned research witness
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: r1m-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: r1m-evidence/windows.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  audit:
+    name: r1m-readonly-two-job-audit
+    needs: [linux, windows]
+    if: ${{ needs.linux.result == 'success' && needs.windows.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout sandbox without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Read all six refs and cross-check actual job outcomes (no write)
+        env:
+          R1M_GITHUB_TOKEN: ${{ github.token }}
+          R1M_LINUX_BASELINE: ${{ needs.linux.outputs.baseline_result }}
+          R1M_WINDOWS_BASELINE: ${{ needs.windows.outputs.baseline_result }}
+          R1M_LINUX_LOST: ${{ needs.linux.outputs.lostreply_result }}
+          R1M_WINDOWS_LOST: ${{ needs.windows.outputs.lostreply_result }}
+        run: python3 -B r1m_ref_audit.py
+      - name: Archive audit report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: r1m-auditor-${{ github.run_id }}-${{ github.run_attempt }}
+          path: r1m-evidence/auditor.json
+          if-no-files-found: warn
+          retention-days: 30

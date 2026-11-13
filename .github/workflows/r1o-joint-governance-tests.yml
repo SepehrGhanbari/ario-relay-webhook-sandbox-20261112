@@ -1,0 +1,33 @@
+name: R1o founder Ario joint governance dry-run negative controls
+on:
+  push:
+    branches:
+      - experiment/r1o-joint-governance-evidence-nonsovereign-20261113
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: r1o-linux-dry-run-fail-closed-governance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout only disposable source without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Run 42 pure mock-only governance cases
+        run: python3 -B -m unittest discover -s tests -p 'test_r1o_*.py' -v
+
+  windows:
+    name: r1o-windows-dry-run-fail-closed-governance
+    runs-on: windows-2025
+    timeout-minutes: 6
+    steps:
+      - name: Checkout only disposable source without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Run 42 pure mock-only governance cases
+        run: python -B -m unittest discover -s tests -p 'test_r1o_*.py' -v

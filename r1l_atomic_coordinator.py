@@ -124,7 +124,7 @@ class Store:
         # Fail closed on physical primary-file damage, even if a remaining WAL
         # could cause SQLite to rebuild. No automatic restore/recreate is allowed.
         with self.path.open("rb") as source:
-            if source.read(16) != b"SQLite format 3\\x00":
+            if source.read(16) != b"SQLite format 3\x00":
                 raise RuntimeError("PRIMARY_DB_HEADER_CORRUPT_HOLD")
         db = self._conn()
         try:

@@ -18,7 +18,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Execute networked-process and SQLite fault injection
-        run: python3 -B -m unittest discover -s tests -p 'test_r1l_*.py' -v
+        run: python3 -B -m unittest discover -s tests -p 'test_r1*.py' -v
 
   windows:
     name: r1l-windows-atomic-claims-crash-recovery
@@ -30,4 +30,4 @@ jobs:
         with:
           persist-credentials: false
       - name: Execute networked-process and SQLite fault injection
-        run: python -B -m unittest discover -s tests -p 'test_r1l_*.py' -v
+        run: python -B -m unittest discover -s tests -p 'test_r1*.py' -v

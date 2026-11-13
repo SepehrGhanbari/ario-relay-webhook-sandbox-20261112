@@ -310,6 +310,100 @@ class R1lTests(unittest.TestCase):
             self.assert_hold(v)
         self.assertEqual(self.status()["claim_count"], 1)
 
+    def test_21_two_separate_servers_same_sqlite_file_share_uniqueness(self):
+        """Two server processes contend through ONE SQLite database on ONE host."""
+        self.assertTrue(self.start_server())
+        first_url = self.url
+        other_port = unused_port()
+        other_url = "http://127.0.0.1:" + str(other_port)
+        peer = subprocess.Popen(
+            [sys.executable, "-u", "-B", str(SERVICE), "--db", str(self.db),
+             "--port", str(other_port)],
+            cwd=ROOT, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        try:
+            deadline = time.monotonic() + 6
+            ready = False
+            while time.monotonic() < deadline:
+                if peer.poll() is not None:
+                    break
+                try:
+                    with socket.create_connection(("127.0.0.1", other_port),
+                                                  timeout=0.15):
+                        ready = True
+                        break
+                except OSError:
+                    time.sleep(0.03)
+            self.assertTrue(ready, "SECOND_SERVER_NOT_READY")
+
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                left = pool.submit(call_once, first_url, fixed_intent())
+                right = pool.submit(call_once, other_url, fixed_intent())
+                results = [left.result(timeout=8), right.result(timeout=8)]
+            statuses = sorted(v["verdict"] for v in results)
+            self.assertEqual(statuses, ["ALREADY_HELD", "CREATED_HOLD"])
+            self.assertEqual(self.status()["claim_count"], 1)
+            for v in results:
+                self.assert_hold(v)
+        finally:
+            if peer.poll() is None:
+                peer.terminate()
+                try:
+                    peer.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    peer.kill()
+                    peer.wait(timeout=5)
+
+    def test_22_separate_coordinator_databases_are_not_globally_atomic(self):
+        """Negative control: disconnected coordinators can BOTH reserve locally.
+
+        This is NOT a global exclusive-publisher design. No GitHub POST occurs.
+        """
+        self.assertTrue(self.start_server())
+        first_url = self.url
+        other_db = self.dir / "independent-split-brain.sqlite3"
+        Store.bootstrap(other_db)
+        other_port = unused_port()
+        other_url = "http://127.0.0.1:" + str(other_port)
+        peer = subprocess.Popen(
+            [sys.executable, "-u", "-B", str(SERVICE), "--db", str(other_db),
+             "--port", str(other_port)],
+            cwd=ROOT, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        try:
+            deadline = time.monotonic() + 6
+            ready = False
+            while time.monotonic() < deadline:
+                if peer.poll() is not None:
+                    break
+                try:
+                    with socket.create_connection(("127.0.0.1", other_port),
+                                                  timeout=0.15):
+                        ready = True
+                        break
+                except OSError:
+                    time.sleep(0.03)
+            self.assertTrue(ready, "SECOND_INDEPENDENT_SERVER_NOT_READY")
+            a = call_once(first_url, fixed_intent())
+            b = call_once(other_url, fixed_intent())
+            self.assertEqual((a["verdict"], b["verdict"]),
+                             ("CREATED_HOLD", "CREATED_HOLD"))
+            self.assertEqual(self.status()["claim_count"], 1)
+            self.assertEqual(Store(other_db).status()["claim_count"], 1)
+            self.assert_hold(a)
+            self.assert_hold(b)
+        finally:
+            if peer.poll() is None:
+                peer.terminate()
+                try:
+                    peer.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    peer.kill()
+                    peer.wait(timeout=5)
+
 
 if __name__ == "__main__":
     unittest.main()

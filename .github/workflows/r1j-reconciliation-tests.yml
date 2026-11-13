@@ -29,3 +29,15 @@ jobs:
           path: r1j-evidence/
           if-no-files-found: warn
           retention-days: 30
+
+  windows-offline:
+    name: r1j-windows-journal-tests
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - name: Checkout disposable source without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Test no-repost journal and check readback mocks on Windows
+        run: python -B -m unittest discover -s tests -p 'test_r1j_*.py' -v

@@ -447,3 +447,45 @@ class TestV02EmptyJournalHonesty(unittest.TestCase):
             obj = json.loads(proc.stdout)
             self.assertEqual(obj["journal_integrity"], "NO_JOURNAL")
             self.assertEqual(obj["historical_completeness"], "UNKNOWN")
+
+
+class TestV03RulesBranchPath(unittest.TestCase):
+    def test_rules_url_for_isolated_branch_reaches_gh_cli(self):
+        repo = r2a0.LAB_REPO
+        target = f"repos/{repo}/rules/branches/experiment%2Fr2a0-test"
+        from subprocess import CompletedProcess
+        with patch.object(r2a0.subprocess, "run", return_value=CompletedProcess(args=[], returncode=0, stdout=b'HTTP/2 200 OK\n\n[]', stderr=b'')) as call:
+            result = r2a0.gh_api(target)
+        self.assertTrue(result["_request_ok"])
+        self.assertEqual(call.call_args.args[0][-1], target)
+
+    def test_snapshot_rules_request_uses_encoded_isolated_branch(self):
+        repo = r2a0.LAB_REPO
+        fixture = {"head": {"sha": "a"*40}, "base": {"ref": "experiment/r2a0-test", "sha":"b"*40, "repo":{"full_name":repo}},
+                   "draft":True, "merged":False, "mergeable":False, "mergeable_state":"draft", "user":{"login":"tester"}}
+        original_gh_api = r2a0.gh_api
+        def fake_api(path, **kwargs):
+            if path.endswith("/pulls/14"):
+                return {"_request_ok":True, "_data":fixture}
+            if "/rules/branches/" in path:
+                # Preserve a real parser/guard test rather than making a mocked call always pass.
+                from subprocess import CompletedProcess
+                with patch.object(r2a0.subprocess, "run", return_value=CompletedProcess(args=[], returncode=0, stdout=b'HTTP/2 200 OK\n\n[]', stderr=b'')):
+                    return original_gh_api(path)
+            return {"_request_ok":True, "_data":{}}
+        with patch.object(r2a0, "gh_api", side_effect=fake_api), patch.object(r2a0, "paged", return_value={"_complete":True, "_items":[]}):
+            result = r2a0.snapshot(repo, 14)
+        self.assertTrue(result["effective_rules"]["_request_ok"])
+
+    def test_encoded_slash_still_rejected_in_other_api_paths(self):
+        repo = r2a0.LAB_REPO
+        for part in ("pulls/experiment%2F4", "contents/test%2Ffoo", "rules/branches/experiment%2Fnot-r2a0-test", "rules/branches/experiment%2Fr2a0-test%2Fmain", "rules/branches/experiment%252Fr2a0-test", "rules/branches/experiment%2Fr2a0-.."):
+            with self.subTest(part=part), patch.object(r2a0.subprocess, "run") as run, self.assertRaises(ValueError):
+                r2a0.gh_api(f"repos/{repo}/{part}")
+            run.assert_not_called()
+
+    def test_nonlab_ref_in_snapshot_denied(self):
+        repo=r2a0.LAB_REPO
+        fixture={"head":{"sha":"a"*40}, "base":{"ref":"main","sha":"b"*40,"repo":{"full_name":repo}},"draft":True,"merged":False,"mergeable":False,"mergeable_state":"draft","user":{"login":"tester"}}
+        with patch.object(r2a0,"gh_api",return_value={"_request_ok":True,"_data":fixture}), self.assertRaises(ValueError):
+            r2a0.snapshot(repo,14)

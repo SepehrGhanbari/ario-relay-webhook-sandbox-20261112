@@ -275,6 +275,14 @@ os._exit(78)'''
         self.assertEqual(damaged.read_bytes(),b'')
         self.assertTrue(self._has_orphan(self.one))
 
+    def test_parent_traversal_coordinator_path_is_hold(self):
+        marker=fixture(self.one)
+        alias=self.db.parent/'..'/'authority'/'claims.db'
+        with self.assertRaises(ValueError):
+            f7.adopt_with_shared_coordinator(r2a0.EvidenceJournal(self.one),f7.SharedCoordinator(alias),marker,
+                                             root_label='A',ack=f7.ACK)
+        self.assertTrue(self._has_orphan(self.one))
+
     def test_symlink_coordinator_path_is_hold(self):
         marker=fixture(self.one)
         alias=self.base/'alias.db'

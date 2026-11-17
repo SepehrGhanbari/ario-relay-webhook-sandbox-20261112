@@ -50,7 +50,11 @@ class SharedCoordinator:
         if (self.filename.is_symlink() or self.filename.parent.is_symlink()
                 or not self.filename.is_file()):
             raise ValueError("COORDINATOR_MISSING_OR_SYMLINK")
-        if self.filename.resolve(strict=True) != self.filename.absolute():
+        # Windows can resolve legitimate absolute paths to a different spelling
+        # (volume/junction/case normalization). Do not compare Path.resolve()
+        # string equality against Path.absolute(); reject *actual* symlink
+        # components and explicit parent traversal instead.
+        if ".." in self.filename.parts or any(part.is_symlink() for part in (self.filename, *self.filename.parents)):
             raise ValueError("COORDINATOR_PATH_ALIAS_OR_SYMLINK")
         if self.filename.stat().st_size == 0:
             raise ValueError("COORDINATOR_UNINITIALIZED")
@@ -59,7 +63,7 @@ class SharedCoordinator:
     def initialize(cls, filename: Path) -> "SharedCoordinator":
         """Explicitly create a new, empty *lab-only* DB. Never overwrite."""
         filename = Path(filename)
-        if filename.parent.is_symlink():
+        if ".." in filename.parts or any(part.is_symlink() for part in (filename, *filename.parents)):
             raise ValueError("SYMLINK_COORDINATOR_DIRECTORY")
         filename.parent.mkdir(parents=True, exist_ok=True)
         # The exclusive creation is a one-time marker; an interrupted setup HOLDS.

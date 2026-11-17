@@ -448,7 +448,8 @@ def main(argv: list[str] | None = None) -> int:
                 # API call. Restart cannot blindly repeat an uncertain merge.
                 ensure_lab(LAB_REPO)
                 ensure_sha(args.expected_head)
-                if not args.base.startswith(BASE_PREFIX) or args.pr < 1:
+                ensure_lab_base_ref(args.base)
+                if args.pr < 1:
                     raise ValueError("OUT_OF_SCOPE_MERGE_INTENT")
                 intent = {"repo": LAB_REPO, "pr": args.pr, "head": args.expected_head,
                           "base": args.base, "scenario": args.scenario}

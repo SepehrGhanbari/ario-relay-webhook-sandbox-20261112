@@ -489,3 +489,21 @@ class TestV03RulesBranchPath(unittest.TestCase):
         fixture={"head":{"sha":"a"*40}, "base":{"ref":"main","sha":"b"*40,"repo":{"full_name":repo}},"draft":True,"merged":False,"mergeable":False,"mergeable_state":"draft","user":{"login":"tester"}}
         with patch.object(r2a0,"gh_api",return_value={"_request_ok":True,"_data":fixture}), self.assertRaises(ValueError):
             r2a0.snapshot(repo,14)
+
+
+class TestV03MergeIntentPreflight(unittest.TestCase):
+    def test_invalid_base_is_rejected_before_journal_side_effects(self):
+        with tempfile.TemporaryDirectory() as d:
+            args = ["attempt-merge", "--pr", "12", "--scenario", "Sc1", "--base", "experiment/r2a0-../main",
+                    "--expected-head", "a"*40, "--execute", "--evidence-dir", d]
+            with patch.object(r2a0, "gh_api") as api:
+                result = r2a0.main(args)
+            self.assertEqual(result, 2)
+            api.assert_not_called()
+            self.assertFalse(any(Path(d).iterdir()), "Invalid branch must not reserve or poison journal state")
+
+    def test_valid_base_scope_check_accepts_flat_fixture(self):
+        r2a0.ensure_lab_base_ref("experiment/r2a0-control")
+        for name in ("experiment/r2a0-../main", "experiment/r2a0-control/extra", "experiment/r2a0-", "main"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                r2a0.ensure_lab_base_ref(name)

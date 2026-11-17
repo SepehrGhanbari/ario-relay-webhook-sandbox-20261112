@@ -649,3 +649,258 @@ os._exit(81)
                 self.skipTest('no symlink permissions')
             with self.assertRaisesRegex(ValueError,'SYMLINK_EVIDENCE_SUBDIRECTORY'):
                 r2a0.EvidenceJournal(root).read()
+
+
+class TestRecoveryV05(unittest.TestCase):
+    """F4: recovery must preserve uncertainty and never retry GitHub merge."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.j = r2a0.EvidenceJournal(self.root)
+        self.intent = {"repo": r2a0.LAB_REPO, "pr": 22,
+                       "head": "a" * 40, "base": "experiment/r2a0-crash",
+                       "scenario": "Sc1"}
+        self.raw = r2a0.canonical(self.intent)
+        self.marker_hash = r2a0.digest(self.raw)
+        self.marker = self.root / "merge_intents" / (self.marker_hash + ".json")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def orphan(self):
+        r2a0.write_once(self.marker, self.raw)
+
+    def recorded(self):
+        self.orphan()
+        self.j.append("merge-intent", "local", self.raw)
+
+    def test_orphan_inspection_holds_and_reads_only(self):
+        self.j.append("manual", "fixture", b"old valid event")
+        self.orphan()
+        before = {p.relative_to(self.root).as_posix(): p.read_bytes()
+                  for p in self.root.rglob("*") if p.is_file()}
+        with patch.object(r2a0, "gh_api") as gh:
+            result = r2a0.inspect_merge_recovery(self.j)
+            gh.assert_not_called()
+        self.assertEqual(result["journal_integrity"], "HOLD_ORPHAN_INTENT")
+        self.assertEqual(result["intents"][0]["journal_stage"], "ORPHAN_MARKER_NOT_JOURNALED")
+        self.assertEqual(result["remote_merge_retry"], "FORBIDDEN")
+        after = {p.relative_to(self.root).as_posix(): p.read_bytes()
+                 for p in self.root.rglob("*") if p.is_file()}
+        self.assertEqual(before, after)
+        with self.assertRaisesRegex(ValueError, "ORPHAN_MERGE_INTENT"):
+            self.j.read()
+
+    def test_adoption_requires_ack_and_preserves_old_evidence(self):
+        prior = self.j.append("manual", "fixture", b"immutable")
+        self.orphan()
+        with self.assertRaises(PermissionError):
+            r2a0.adopt_single_orphan_intent(self.j, self.marker_hash, ack="")
+        with patch.object(r2a0, "gh_api") as gh:
+            result = r2a0.adopt_single_orphan_intent(
+                self.j, self.marker_hash, ack="RECORD_ORPHAN_ONLY_NO_MERGE_RETRY")
+            gh.assert_not_called()
+        self.assertEqual(result["status"], "HOLD_OUTCOME_UNKNOWN")
+        rows = self.j.read()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0], prior)
+        self.assertEqual(rows[-1]["meta"]["recovery"], "ORPHAN_MARKER_RECORDED_AFTER_CRASH")
+        self.assertEqual(rows[-1]["meta"]["remote_effect"], "UNKNOWN")
+        self.assertEqual(self.marker.read_bytes(), self.raw)
+        report = r2a0.inspect_merge_recovery(self.j)
+        self.assertEqual(report["intents"][0]["journal_stage"], "INTENT_RECORDED_OUTCOME_UNKNOWN")
+        self.assertEqual(report["remote_merge_retry"], "FORBIDDEN")
+
+    def test_adoption_twice_never_duplicates(self):
+        self.orphan()
+        ack = "RECORD_ORPHAN_ONLY_NO_MERGE_RETRY"
+        r2a0.adopt_single_orphan_intent(self.j, self.marker_hash, ack=ack)
+        with self.assertRaisesRegex(ValueError, "NOT_A_SINGLE_SAFE_TO_RECORD_ORPHAN"):
+            r2a0.adopt_single_orphan_intent(self.j, self.marker_hash, ack=ack)
+        self.assertEqual(len(self.j.read()), 1)
+
+    def test_unrelated_orphan_claim_blocks_recovery(self):
+        self.orphan()
+        r2a0.write_once(self.root / "claims" / "000001.json", b"incomplete")
+        with self.assertRaises(ValueError):
+            r2a0.inspect_merge_recovery(self.j)
+        with self.assertRaises(ValueError):
+            r2a0.adopt_single_orphan_intent(self.j, self.marker_hash,
+                                           ack="RECORD_ORPHAN_ONLY_NO_MERGE_RETRY")
+
+    def test_two_orphans_never_adopted(self):
+        self.orphan()
+        second = dict(self.intent, pr=23)
+        raw = r2a0.canonical(second)
+        r2a0.write_once(self.root / "merge_intents" / (r2a0.digest(raw) + ".json"), raw)
+        with self.assertRaisesRegex(ValueError, "AMBIGUOUS_OR_UNRECOVERABLE_MERGE_INTENT"):
+            r2a0.inspect_merge_recovery(self.j)
+        with self.assertRaises(ValueError):
+            r2a0.adopt_single_orphan_intent(self.j, self.marker_hash,
+                                           ack="RECORD_ORPHAN_ONLY_NO_MERGE_RETRY")
+
+    def test_corrupt_marker_never_recorded(self):
+        self.orphan()
+        self.marker.write_bytes(b"{}")
+        with self.assertRaises(ValueError):
+            r2a0.inspect_merge_recovery(self.j)
+        with self.assertRaises(ValueError):
+            r2a0.adopt_single_orphan_intent(self.j, self.marker_hash,
+                                           ack="RECORD_ORPHAN_ONLY_NO_MERGE_RETRY")
+        self.assertFalse(self.j.index.exists())
+
+    def test_wrong_hash_never_records(self):
+        self.orphan()
+        with self.assertRaisesRegex(ValueError, "NOT_A_SINGLE_SAFE_TO_RECORD_ORPHAN"):
+            r2a0.adopt_single_orphan_intent(self.j, "0"*64,
+                                           ack="RECORD_ORPHAN_ONLY_NO_MERGE_RETRY")
+        self.assertFalse(self.j.index.exists())
+
+    def test_committed_intent_without_response_holds(self):
+        self.recorded()
+        with patch.object(r2a0, "gh_api") as gh:
+            result = r2a0.inspect_merge_recovery(self.j)
+            gh.assert_not_called()
+        self.assertEqual(result["journal_integrity"], "PASS")
+        self.assertEqual(result["status"], "HOLD")
+        self.assertEqual(result["intents"][0]["journal_stage"], "INTENT_RECORDED_OUTCOME_UNKNOWN")
+
+    def test_ambiguous_response_still_holds(self):
+        self.recorded()
+        self.j.append("merge-attempt", "gh-api",
+                      r2a0.canonical({"status":"MERGE_API_RETURNED", "response":{"_request_ok":False, "_unknown_outcome":True}}),
+                      {"pr":22,"scenario":"Sc1","expected_head":"a"*40,"base":"experiment/r2a0-crash","execute":True})
+        report = r2a0.inspect_merge_recovery(self.j)
+        self.assertEqual(report["intents"][0]["journal_stage"], "RESPONSE_RECORDED_NOT_PROOF_OF_MERGE")
+        self.assertEqual(report["status"], "HOLD")
+
+    def _remote(self, merged=False, state="open", head=None, base=None, repo=None):
+        return {"_request_ok":True,"_data":{
+            "head":{"sha":head or "a"*40},
+            "base":{"ref":base or "experiment/r2a0-crash", "repo":{"full_name":repo or r2a0.LAB_REPO}},
+            "merged":merged,"state":state,"merge_commit_sha":"b"*40}}
+
+    def test_remote_get_observes_unmerged_but_never_allows_retry(self):
+        self.recorded()
+        with patch.object(r2a0, "gh_api", return_value=self._remote()) as gh:
+            report = r2a0.inspect_merge_recovery(self.j, marker_sha256=self.marker_hash, remote=True)
+        self.assertEqual(gh.call_count, 1)
+        self.assertEqual(gh.call_args.kwargs["method"], "GET")
+        self.assertEqual(report["intents"][0]["remote"]["observation"], "OPEN_UNMERGED_AT_READ_TIME")
+        self.assertFalse(report["intents"][0]["remote"]["can_retry"])
+
+    def test_remote_get_merge_true_does_not_claim_attribution(self):
+        self.recorded()
+        with patch.object(r2a0, "gh_api", return_value=self._remote(merged=True,state="closed")) as gh:
+            report = r2a0.inspect_merge_recovery(self.j, remote=True)
+        self.assertEqual(gh.call_args.kwargs["method"], "GET")
+        self.assertEqual(report["intents"][0]["remote"]["observation"], "MERGED_OBSERVED_ATTRIBUTION_UNKNOWN")
+        self.assertEqual(report["status"], "HOLD")
+
+    def test_remote_head_drift_blocks_inference(self):
+        self.recorded()
+        with patch.object(r2a0, "gh_api", return_value=self._remote(head="c"*40)):
+            report = r2a0.inspect_merge_recovery(self.j, remote=True)
+        self.assertEqual(report["intents"][0]["remote"]["observation"], "REMOTE_TARGET_DRIFT_HOLD")
+
+    def test_remote_read_error_unknown(self):
+        self.recorded()
+        with patch.object(r2a0, "gh_api", return_value={"_request_ok":False,"_http_status":503}):
+            report = r2a0.inspect_merge_recovery(self.j, remote=True)
+        self.assertEqual(report["intents"][0]["remote"]["observation"], "REMOTE_GET_UNKNOWN")
+
+    def test_multiple_intents_require_explicit_remote_selection(self):
+        self.recorded()
+        new = dict(self.intent,pr=23)
+        raw=r2a0.canonical(new)
+        r2a0.write_once(self.root / "merge_intents" / (r2a0.digest(raw)+".json"), raw)
+        self.j.append("merge-intent","local",raw)
+        with patch.object(r2a0, "gh_api") as gh:
+            with self.assertRaisesRegex(ValueError,"REMOTE_INSPECTION_REQUIRES_SINGLE_INTENT"):
+                r2a0.inspect_merge_recovery(self.j, remote=True)
+            gh.assert_not_called()
+
+    def test_ack_checked_before_reservation_no_writes(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(r2a0,"authorized_merge") as merge:
+            ret = r2a0.main(["attempt-merge", "--pr","22", "--scenario","Sc1", "--base","experiment/r2a0-crash",
+                             "--expected-head","a"*40,"--execute","--evidence-dir",str(self.root)])
+            self.assertEqual(ret,2)
+            merge.assert_not_called()
+        self.assertFalse(any(self.root.iterdir()))
+
+    def test_live_remote_flag_never_writes_journal(self):
+        self.recorded()
+        before = self.j.index.read_bytes()
+        with patch.object(r2a0,"gh_api",return_value=self._remote()) as gh:
+            r2a0.inspect_merge_recovery(self.j, remote=True)
+            gh.assert_called_once()
+        self.assertEqual(self.j.index.read_bytes(),before)
+
+    def test_crash_subprocess_marker_adoption_preserves_claim(self):
+        # Real subprocess death between durable reservation and journal.
+        import subprocess as sp
+        fixture = """import sys, pathlib\nfrom pathlib import Path\nsys.path.insert(0, sys.argv[2])\nimport r2a0\nintent={"repo":r2a0.LAB_REPO,"pr":22,"head":"a"*40,"base":"experiment/r2a0-crash","scenario":"Sc1"}\nraw=r2a0.canonical(intent)\nr2a0.write_once(Path(sys.argv[1])/"merge_intents"/(r2a0.digest(raw)+".json"),raw)\nimport os;os._exit(73)"""
+        cp=sp.run([sys.executable,"-c",fixture,str(self.root),str(Path(r2a0.__file__).parent)],
+                  stdout=sp.PIPE,stderr=sp.PIPE,timeout=10)
+        self.assertEqual(cp.returncode,73)
+        with self.assertRaisesRegex(ValueError,"ORPHAN_MERGE_INTENT"):
+            self.j.read()
+        result=r2a0.inspect_merge_recovery(self.j)
+        self.assertEqual(result["intents"][0]["journal_stage"],"ORPHAN_MARKER_NOT_JOURNALED")
+        with patch.object(r2a0,"gh_api") as gh:
+            adopt=r2a0.adopt_single_orphan_intent(self.j,self.marker_hash,
+                      ack="RECORD_ORPHAN_ONLY_NO_MERGE_RETRY")
+            gh.assert_not_called()
+        self.assertEqual(adopt["status"],"HOLD_OUTCOME_UNKNOWN")
+        self.assertEqual(len(self.j.read()),1)
+
+class TestRecoveryCliGuardsV05(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.root=Path(self.tmp.name)
+        self.intent={"repo":r2a0.LAB_REPO,"pr":22,"head":"a"*40,"base":"experiment/r2a0-crash","scenario":"Sc1"}
+        self.raw=r2a0.canonical(self.intent)
+        self.j=r2a0.EvidenceJournal(self.root)
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_no_blind_retry_even_if_scenario_changes(self):
+        raw=self.raw
+        r2a0.write_once(self.root/"merge_intents"/(r2a0.digest(raw)+".json"),raw)
+        self.j.append("merge-intent","local",raw)
+        with patch.dict(os.environ,{"ARIO_R2A0_DISPOSABLE_MERGE_ACK":"EXPLICITLY_ALLOW_LAB_MERGE"}),patch.object(r2a0,"authorized_merge") as merge:
+            ret=r2a0.main(["attempt-merge","--pr","22","--scenario","Sc2","--base","experiment/r2a0-crash","--expected-head","a"*40,"--execute","--evidence-dir",str(self.root)])
+            self.assertEqual(ret,2)
+            merge.assert_not_called()
+        self.assertEqual(len(self.j.read()),1)
+        self.assertEqual(len(list((self.root/"merge_intents").iterdir())),1)
+
+    def test_verify_integrity_pass_is_not_merge_authority(self):
+        import contextlib,io
+        raw=self.raw
+        r2a0.write_once(self.root/"merge_intents"/(r2a0.digest(raw)+".json"),raw)
+        self.j.append("merge-intent","local",raw)
+        output=io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(r2a0.main(["verify","--evidence-dir",str(self.root)]),0)
+        result=json.loads(output.getvalue())
+        self.assertEqual(result["journal_integrity"],"PASS")
+        self.assertEqual(result["merge_intent_safety"],"HOLD_REQUIRES_RECONCILIATION")
+        self.assertEqual(result["native_merge_authority"],"NOT_GRANTED")
+
+    def test_record_orphan_crash_after_claim_blocks_everything(self):
+        intent=self.raw
+        h=r2a0.digest(intent)
+        r2a0.write_once(self.root/"merge_intents"/(h+".json"),intent)
+        original=r2a0.write_once
+        def crash_after_claim(path,data):
+            original(path,data)
+            if Path(path).parent.name == "claims":
+                raise OSError("injected process interruption")
+        with patch.object(r2a0,"write_once",side_effect=crash_after_claim),patch.object(r2a0,"gh_api") as gh:
+            with self.assertRaises(OSError):
+                r2a0.adopt_single_orphan_intent(self.j,h,ack="RECORD_ORPHAN_ONLY_NO_MERGE_RETRY")
+            gh.assert_not_called()
+        with self.assertRaises(ValueError):
+            r2a0.inspect_merge_recovery(self.j)
+        self.assertTrue(any((self.root/"claims").iterdir()))

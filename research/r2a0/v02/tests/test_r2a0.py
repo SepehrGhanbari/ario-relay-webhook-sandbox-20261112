@@ -904,3 +904,147 @@ class TestRecoveryCliGuardsV05(unittest.TestCase):
         with self.assertRaises(ValueError):
             r2a0.inspect_merge_recovery(self.j)
         self.assertTrue(any((self.root/"claims").iterdir()))
+
+class TestRecoveryTwoRealProcessesV06(unittest.TestCase):
+    """Same-host independent OS processes, not independent custodians/hosts."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "evidence"
+        self.root.mkdir()
+        self.gate = Path(self.tmp.name) / "gate"
+        self.gate.mkdir()
+        self.j = r2a0.EvidenceJournal(self.root)
+        self.original = self.j.append("manual", "fixture", b"immutable history")
+        self.intent = {"repo": r2a0.LAB_REPO, "pr": 22, "head": "a"*40,
+                       "base": "experiment/r2a0-crash", "scenario": "Sc1"}
+        self.raw = r2a0.canonical(self.intent)
+        self.marker_hash = r2a0.digest(self.raw)
+        self.marker = self.root / "merge_intents" / (self.marker_hash + ".json")
+        r2a0.write_once(self.marker, self.raw)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    @staticmethod
+    def _worker_script():
+        # Event is synchronized AFTER both processes have independently passed
+        # orphan preflight, immediately BEFORE durable journal append.
+        return r'''
+import json, os, sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[4])
+import r2a0
+root=Path(sys.argv[1]); marker_hash=sys.argv[2]
+worker=sys.argv[3]; gate=Path(sys.argv[5]); crash=sys.argv[6]=='crash'
+
+def fail_if_network(*a, **kw):
+    raise AssertionError('RECOVERY_MUST_NEVER_CALL_GITHUB')
+r2a0.gh_api=fail_if_network
+orig_append=r2a0.EvidenceJournal.append
+orig_write=r2a0.write_once
+
+def wait_append(self,event,source,data,meta=None):
+    if event=='merge-intent':
+        orig_write(gate/(worker+'.ready'),b'PASSED_ORPHAN_PREFLIGHT')
+        until=time.monotonic()+8
+        while not (gate/'GO').exists():
+            if time.monotonic()>until: raise TimeoutError('BARRIER_TIMEOUT')
+            time.sleep(.005)
+    return orig_append(self,event,source,data,meta)
+
+def abort_after_claim(path,data):
+    orig_write(path,data)
+    if Path(path).parent.name=='claims':
+        os._exit(73)
+r2a0.EvidenceJournal.append=wait_append
+if crash:
+    r2a0.write_once=abort_after_claim
+try:
+    result=r2a0.adopt_single_orphan_intent(r2a0.EvidenceJournal(root),marker_hash,
+        ack='RECORD_ORPHAN_ONLY_NO_MERGE_RETRY')
+    print(json.dumps({'worker':worker,'outcome':'RECORDED','result':result}),flush=True)
+except Exception as e:
+    print(json.dumps({'worker':worker,'outcome':'HOLD','exception':type(e).__name__,
+                      'message':str(e)}),flush=True)
+'''
+
+    def _race(self, *, crash=False):
+        import subprocess as sp
+        script=self._worker_script()
+        processes=[]
+        for worker in ('w1','w2'):
+            args=[sys.executable,'-c',script,str(self.root),self.marker_hash,worker,
+                  str(Path(r2a0.__file__).parent),str(self.gate),
+                  'crash' if crash else 'normal']
+            # Explicit approval env must NEVER turn recovery into a merge attempt.
+            env=dict(os.environ,ARIO_R2A0_DISPOSABLE_MERGE_ACK='EXPLICITLY_ALLOW_LAB_MERGE')
+            processes.append(sp.Popen(args,stdout=sp.PIPE,stderr=sp.PIPE,env=env))
+        try:
+            deadline=time.monotonic()+10
+            while not all((self.gate/(w+'.ready')).exists() for w in ('w1','w2')):
+                if time.monotonic()>deadline:
+                    raise AssertionError('BOTH_CONTENDERS_DID_NOT_REACH_BARRIER')
+                if any(p.poll() is not None for p in processes):
+                    raise AssertionError('CONTENDER_EXITED_BEFORE_RACE')
+                time.sleep(.005)
+            r2a0.write_once(self.gate/'GO',b'start')
+            return [(p.returncode, json.loads(stdout.strip()) if stdout.strip() else None,
+                     stderr.decode('utf-8',errors='replace')[:1000])
+                    for p in processes
+                    for stdout,stderr in [p.communicate(timeout=12)] ]
+        finally:
+            for p in processes:
+                if p.poll() is None:
+                    p.kill();p.wait(timeout=3)
+
+    def test_two_processes_same_orphan_at_most_one_recovery_record(self):
+        results=self._race()
+        self.assertTrue(all(rc==0 for rc,_,_ in results),results)
+        self.assertEqual(sum(o['outcome']=='RECORDED' for _,o,_ in results),1,results)
+        self.assertEqual(sum(o['outcome']=='HOLD' for _,o,_ in results),1,results)
+        rows=self.j.read()
+        self.assertEqual(len(rows),2)
+        self.assertEqual(rows[0],self.original)
+        self.assertEqual(rows[1]['event'],'merge-intent')
+        self.assertEqual(rows[1]['meta']['remote_put_retried'],False)
+        report=r2a0.inspect_merge_recovery(self.j)
+        self.assertEqual(report['status'],'HOLD')
+        self.assertEqual(report['remote_merge_retry'],'FORBIDDEN')
+        self.assertEqual(report['intents'][0]['journal_stage'],'INTENT_RECORDED_OUTCOME_UNKNOWN')
+        self.assertEqual(len(list((self.root/'merge_intents').glob('*.json'))),1)
+
+    def test_two_processes_one_crashes_after_claim_both_fail_closed(self):
+        results=self._race(crash=True)
+        self.assertEqual(sum(rc==73 for rc,_,_ in results),1,results)
+        self.assertEqual(sum(o is not None and o['outcome']=='HOLD' for _,o,_ in results),1,results)
+        with self.assertRaises(ValueError):
+            self.j.read()
+        with self.assertRaises(ValueError):
+            r2a0.inspect_merge_recovery(self.j)
+        self.assertTrue((self.root/'merge_intents'/(self.marker_hash+'.json')).exists())
+        self.assertTrue((self.root/'claims'/'000002.json').exists())
+        self.assertEqual(len(self.j.index.read_bytes().splitlines()),1)
+        self.assertEqual(r2a0.canonical(self.original), self.j.index.read_bytes().strip())
+
+    def test_parallel_readers_cannot_grant_retry_or_modify_evidence(self):
+        import subprocess as sp
+        before={p.relative_to(self.root).as_posix():p.read_bytes()
+                for p in self.root.rglob('*') if p.is_file()}
+        cmd=[sys.executable,str(Path(r2a0.__file__)), 'inspect-recovery',
+             '--evidence-dir',str(self.root)]
+        a=sp.Popen(cmd,stdout=sp.PIPE,stderr=sp.PIPE)
+        b=sp.Popen(cmd,stdout=sp.PIPE,stderr=sp.PIPE)
+        results=[]
+        for proc in (a,b):
+            out,err=proc.communicate(timeout=10)
+            self.assertEqual(proc.returncode,0,err.decode())
+            data=json.loads(out)
+            self.assertEqual(data['remote_merge_retry'],'FORBIDDEN')
+            self.assertEqual(data['journal_integrity'],'HOLD_ORPHAN_INTENT')
+            self.assertEqual(data['merge_authorization'],'NOT_GRANTED')
+            results.append(data)
+        after={p.relative_to(self.root).as_posix():p.read_bytes()
+               for p in self.root.rglob('*') if p.is_file()}
+        self.assertEqual(before,after)
+        self.assertEqual(results[0]['intents'],results[1]['intents'])

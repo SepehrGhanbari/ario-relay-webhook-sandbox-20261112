@@ -273,6 +273,173 @@ class EvidenceJournal:
             return item
 
 
+
+def _merge_intent_entries(journal: EvidenceJournal) -> tuple[list[dict], list[dict], str]:
+    """Classify recorded and at most one orphan intent without changing disk.
+
+    This deliberately does not 'fix' an orphan claim/object, a torn index,
+    a malformed marker, or multiple orphan markers. Those are manual HOLDs.
+    """
+    journal._safe_root()
+    folder = journal.root / "merge_intents"
+    if folder.exists() and not folder.is_dir():
+        raise ValueError("INVALID_MERGE_INTENT_DIRECTORY")
+    markers = []
+    if folder.exists():
+        for path in sorted(folder.iterdir()):
+            if len(markers) >= 128:
+                raise ValueError("MERGE_INTENT_INSPECTION_CAP")
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 4096:
+                raise ValueError("INVALID_MERGE_INTENT_MARKER")
+            raw = path.read_bytes()
+            intent = journal._validated_merge_intent(raw)
+            sha = digest(raw)
+            if path.name != sha + ".json":
+                raise ValueError("INVALID_MERGE_INTENT_MARKER")
+            markers.append({"sha256": sha, "intent": intent, "raw": raw})
+    try:
+        rows = journal.read()
+        orphan = None
+        integrity = "PASS"
+    except ValueError as exc:
+        # Do not mask unrelated corruption as an expected orphan.
+        if str(exc) != "ORPHAN_MERGE_INTENT":
+            raise
+        accepted = []
+        for item in markers:
+            try:
+                recovered_rows = journal.read(_pending_merge_intent=item["raw"])
+                accepted.append((item["sha256"], recovered_rows))
+            except ValueError:
+                continue
+        if len(accepted) != 1:
+            raise ValueError("AMBIGUOUS_OR_UNRECOVERABLE_MERGE_INTENT") from exc
+        orphan, rows = accepted[0]
+        integrity = "HOLD_ORPHAN_INTENT"
+    indexed = {}
+    responses = []
+    for record in rows:
+        if record["event"] == "merge-intent":
+            raw = (journal.root / record["payload_path"]).read_bytes()
+            h = digest(raw)
+            if h in indexed:
+                raise ValueError("DUPLICATE_MERGE_INTENT_IN_JOURNAL")
+            indexed[h] = record
+        elif record["event"] == "merge-attempt":
+            responses.append(record)
+    entries = []
+    for marker in markers:
+        intent = marker["intent"]
+        h = marker["sha256"]
+        matched_responses = [row for row in responses
+                             if row["meta"].get("pr") == intent["pr"]
+                             and row["meta"].get("scenario") == intent["scenario"]
+                             and row["meta"].get("expected_head") == intent["head"]
+                             and row["meta"].get("base") == intent["base"]
+                             and row["meta"].get("execute") is True]
+        if len(matched_responses) > 1:
+            raise ValueError("AMBIGUOUS_DUPLICATE_MERGE_RESPONSE")
+        if h == orphan:
+            stage = "ORPHAN_MARKER_NOT_JOURNALED"
+        elif h not in indexed:
+            raise ValueError("INTENT_MARKER_NOT_IN_JOURNAL")
+        elif not matched_responses:
+            stage = "INTENT_RECORDED_OUTCOME_UNKNOWN"
+        else:
+            stage = "RESPONSE_RECORDED_NOT_PROOF_OF_MERGE"
+        entries.append({"marker_sha256": h, "intent": intent,
+                        "journal_stage": stage,
+                        "journal_intent_seq": indexed[h]["seq"] if h in indexed else None,
+                        "response_seq": matched_responses[0]["seq"] if matched_responses else None,
+                        "never_blind_retry": True})
+    return entries, rows, integrity
+
+
+def read_only_remote_status(intent: dict) -> dict:
+    """GET-only snapshot. Even merged=true never attributes a merge to us."""
+    ensure_lab(intent["repo"])
+    ensure_sha(intent["head"])
+    ensure_lab_base_ref(intent["base"])
+    if type(intent["pr"]) is not int or intent["pr"] < 1:
+        raise ValueError("INVALID_RECOVERY_PR")
+    result = gh_api(f"repos/{LAB_REPO}/pulls/{intent['pr']}", method="GET")
+    if not result.get("_request_ok") or not isinstance(result.get("_data"), dict):
+        return {"observation": "REMOTE_GET_UNKNOWN", "can_retry": False,
+                "http_status": result.get("_http_status")}
+    pr = result["_data"]
+    head = pr.get("head")
+    base = pr.get("base")
+    if not isinstance(head, dict) or not isinstance(base, dict) or not isinstance(base.get("repo"), dict):
+        return {"observation": "REMOTE_SHAPE_UNKNOWN", "can_retry": False}
+    if (head.get("sha") != intent["head"] or
+        base.get("ref") != intent["base"] or
+        base["repo"].get("full_name") != LAB_REPO):
+        return {"observation": "REMOTE_TARGET_DRIFT_HOLD", "can_retry": False}
+    if pr.get("merged") is True:
+        return {"observation": "MERGED_OBSERVED_ATTRIBUTION_UNKNOWN", "can_retry": False,
+                "merge_commit_sha": pr.get("merge_commit_sha")}
+    if pr.get("merged") is False and pr.get("state") == "open":
+        return {"observation": "OPEN_UNMERGED_AT_READ_TIME", "can_retry": False}
+    return {"observation": "REMOTE_STATE_UNKNOWN", "can_retry": False}
+
+
+def inspect_merge_recovery(journal: EvidenceJournal, *, marker_sha256: str | None = None,
+                           remote: bool = False) -> dict:
+    """Read-only evidence inspection, with optional single-target remote GET.
+
+    No claim of historical completeness or permission to retry can result.
+    """
+    entries, rows, integrity = _merge_intent_entries(journal)
+    if marker_sha256 is not None:
+        if not re.fullmatch(r"[a-f0-9]{64}", marker_sha256):
+            raise ValueError("INVALID_MARKER_SHA256")
+        entries = [e for e in entries if e["marker_sha256"] == marker_sha256]
+        if len(entries) != 1:
+            raise ValueError("UNKNOWN_MERGE_INTENT_HASH")
+    if remote and len(entries) != 1:
+        raise ValueError("REMOTE_INSPECTION_REQUIRES_SINGLE_INTENT")
+    if remote:
+        entries[0]["remote"] = read_only_remote_status(entries[0]["intent"])
+    return {"status": "HOLD" if entries or integrity != "PASS" else "NO_INTENTS",
+            "journal_integrity": integrity,
+            "historical_completeness": "UNKNOWN",
+            "merge_authorization": "NOT_GRANTED",
+            "remote_merge_retry": "FORBIDDEN",
+            "records": len(rows), "intents": entries}
+
+
+def adopt_single_orphan_intent(journal: EvidenceJournal, marker_sha256: str, *, ack: str) -> dict:
+    """Explicit evidence-preserving append, NEVER a GitHub write/retry.
+
+    This records that the reserved marker existed after an interruption.
+    It cannot establish whether a native merge request was ever sent.
+    """
+    if ack != "RECORD_ORPHAN_ONLY_NO_MERGE_RETRY":
+        raise PermissionError("EXPLICIT_RECOVERY_ACK_REQUIRED")
+    if not re.fullmatch(r"[a-f0-9]{64}", marker_sha256):
+        raise ValueError("INVALID_MARKER_SHA256")
+    # _merge_intent_entries rejects corrupt evidence and multiple orphans.
+    entries, _, integrity = _merge_intent_entries(journal)
+    matching = [e for e in entries if e["marker_sha256"] == marker_sha256]
+    if integrity != "HOLD_ORPHAN_INTENT" or len(matching) != 1 or matching[0]["journal_stage"] != "ORPHAN_MARKER_NOT_JOURNALED":
+        raise ValueError("NOT_A_SINGLE_SAFE_TO_RECORD_ORPHAN")
+    path = journal.root / "merge_intents" / (marker_sha256 + ".json")
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("INVALID_MERGE_INTENT_MARKER")
+    raw = path.read_bytes()
+    journal._validated_merge_intent(raw)
+    if digest(raw) != marker_sha256:
+        raise ValueError("MARKER_CHANGED_DURING_RECOVERY")
+    record = journal.append("merge-intent", "local", raw,
+                            {"recovery": "ORPHAN_MARKER_RECORDED_AFTER_CRASH",
+                             "remote_effect": "UNKNOWN",
+                             "remote_put_retried": False,
+                             "original_marker_sha256": marker_sha256})
+    return {"status": "HOLD_OUTCOME_UNKNOWN", "action": "APPENDED_RECOVERY_EVIDENCE_ONLY",
+            "record_seq": record["seq"], "record_hash": record["record_hash"],
+            "remote_merge_retry": "FORBIDDEN"}
+
+
 def parse_gh_response(raw: bytes, returncode: int, method: str) -> dict:
     """Retain HTTP status and JSON, never persist response headers or CLI stderr."""
     try:
@@ -477,6 +644,14 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--evidence-dir", type=Path, default=Path("evidence"))
     v = sub.add_parser("verify", help="Verify journal hash chain and payload bytes")
     v.add_argument("--evidence-dir", type=Path, default=Path("evidence"))
+    ri = sub.add_parser("inspect-recovery", help="Read-only HOLD report; optionally one scoped GitHub GET")
+    ri.add_argument("--evidence-dir", type=Path, default=Path("evidence"))
+    ri.add_argument("--marker-sha256")
+    ri.add_argument("--remote", action="store_true", help="GET PR only, never POST/PUT")
+    ar = sub.add_parser("record-orphan", help="Explicitly journal one intact orphan marker, without remote write")
+    ar.add_argument("--evidence-dir", type=Path, default=Path("evidence"))
+    ar.add_argument("--marker-sha256", required=True)
+    ar.add_argument("--ack", required=True)
     a = sub.add_parser("attempt-merge", help="DRY-RUN by default; actual merge needs two explicit approvals")
     a.add_argument("--pr", type=int, required=True)
     a.add_argument("--scenario", choices=SCENARIOS, required=True)
@@ -498,7 +673,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "verify":
             rows = EvidenceJournal(args.evidence_dir).read()
             integrity = "PASS" if rows else ("EMPTY_JOURNAL" if EvidenceJournal(args.evidence_dir).index.exists() else "NO_JOURNAL")
-            print(json.dumps({"journal_integrity": integrity, "records": len(rows), "last_hash": rows[-1]["record_hash"] if rows else None, "historical_completeness": "UNKNOWN", "independent_custody": "NOT_ESTABLISHED"}))
+            print(json.dumps({"journal_integrity": integrity, "records": len(rows), "last_hash": rows[-1]["record_hash"] if rows else None, "historical_completeness": "UNKNOWN", "independent_custody": "NOT_ESTABLISHED", "merge_intent_safety": "HOLD_REQUIRES_RECONCILIATION" if any(r["event"] == "merge-intent" for r in rows) else "NO_RECORDED_MERGE_INTENT", "native_merge_authority": "NOT_GRANTED"}))
+        elif args.command == "inspect-recovery":
+            result = inspect_merge_recovery(EvidenceJournal(args.evidence_dir),
+                                            marker_sha256=args.marker_sha256, remote=args.remote)
+            print(json.dumps(result, sort_keys=True))
+        elif args.command == "record-orphan":
+            result = adopt_single_orphan_intent(EvidenceJournal(args.evidence_dir),
+                                                 args.marker_sha256, ack=args.ack)
+            print(json.dumps(result, sort_keys=True))
         elif args.command == "snapshot":
             result = snapshot(LAB_REPO, args.pr)
             rec = EvidenceJournal(args.evidence_dir).append("snapshot", "gh-api", canonical(result), {"scenario": args.scenario, "stage": args.stage, "pr": args.pr})
@@ -516,6 +699,15 @@ def main(argv: list[str] | None = None) -> int:
                 ensure_lab_base_ref(args.base)
                 if args.pr < 1:
                     raise ValueError("OUT_OF_SCOPE_MERGE_INTENT")
+                if os.environ.get("ARIO_R2A0_DISPOSABLE_MERGE_ACK") != "EXPLICITLY_ALLOW_LAB_MERGE":
+                    raise PermissionError("EXPLICIT_LAB_MERGE_ACK_REQUIRED_BEFORE_RESERVATION")
+                # Each evidence directory is single-use for merge probes. A
+                # previous intent of ANY scenario/PR/HEAD is unresolved until
+                # separately dispositioned; never treat a new scenario as retry
+                # authorization. This is NOT a cross-host transaction lock.
+                existing = inspect_merge_recovery(journal)
+                if existing["intents"]:
+                    raise ValueError("PREVIOUS_MERGE_INTENT_HOLD_USE_NEW_EVIDENCE_DIR")
                 intent = {"repo": LAB_REPO, "pr": args.pr, "head": args.expected_head,
                           "base": args.base, "scenario": args.scenario}
                 name = digest(canonical(intent)) + ".json"

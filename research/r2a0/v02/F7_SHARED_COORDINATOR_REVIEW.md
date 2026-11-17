@@ -36,7 +36,7 @@ This is a **one-file, one-host coordination experiment**, not distributed consen
 - F7h: simulated loss of the second coordinator write leaves one local journal complete but the global claim in `CLAIMED` only; duplicate local/global action still cannot be assumed safe.
 - F7i: no state, even `LOCAL_EVIDENCE_RECORDED`, reports GitHub merge authorization.
 
-`python -m unittest discover -s tests -p 'test*.py' -q` on CPython 3.13.5 Linux: **120 tests / 120 PASS** (98 prior F6 tests + 22 F7 tests). Cross-platform GitHub Actions results must be checked on the eventual exact PR HEAD. On Windows, tests specifically requiring `/dev/shm` are expected to skip; do not report them as Windows filesystem tests.
+`python -m unittest discover -s tests -p 'test*.py' -q` on CPython 3.13.5 Linux: **121 tests / 121 PASS** (98 prior F6 tests + 23 F7 tests). GitHub-hosted Windows CI on the first F7 source HEAD **FAILED** because a path-string equality guard rejected a valid normalized Windows path. This was not concealed: the guard was narrowed to explicit symlink components and `..` traversal, with one new test. The **121 local tests PASS** after that fix; the corrected GitHub CI must be evaluated separately at the final exact HEAD. This is advisory PR-authored CI only, not trusted admission. On Windows, tests specifically requiring `/dev/shm` are expected to skip; do not report them as Windows filesystem tests.
 
 **No real GitHub Sc1/Sc2/Sk/Sn/Sc3/Sc4/Se1 experiment has run.** No independent human/operator custody exists. F7 still lacks a verified production enforcement integration.
 

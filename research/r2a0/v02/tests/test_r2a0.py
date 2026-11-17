@@ -507,3 +507,145 @@ class TestV03MergeIntentPreflight(unittest.TestCase):
         for name in ("experiment/r2a0-../main", "experiment/r2a0-control/extra", "experiment/r2a0-", "main"):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 r2a0.ensure_lab_base_ref(name)
+
+
+class TestV04MergeIntentCrashCustody(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.journal = r2a0.EvidenceJournal(self.root)
+        self.intent = {
+            "repo": r2a0.LAB_REPO, "pr": 22, "head": "a" * 40,
+            "base": "experiment/r2a0-crash", "scenario": "Sc1"
+        }
+        self.raw = r2a0.canonical(self.intent)
+        self.marker = self.root / "merge_intents" / (r2a0.digest(self.raw) + ".json")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _reserve(self):
+        r2a0.write_once(self.marker, self.raw)
+
+    def test_crash_between_merge_reservation_and_journal_must_halt_verify(self):
+        self.journal.append("manual", "fixture", b"older healthy evidence")
+        script = """import os,sys
+from pathlib import Path
+import r2a0
+raw = bytes.fromhex(sys.argv[2])
+r2a0.write_once(Path(sys.argv[1]) / 'merge_intents' / (r2a0.digest(raw) + '.json'), raw)
+os._exit(79)
+"""
+        env = dict(os.environ, PYTHONPATH=str(Path(r2a0.__file__).parent))
+        killed = __import__("subprocess").run(
+            [sys.executable, "-c", script, str(self.root), self.raw.hex()],
+            env=env, capture_output=True, timeout=10)
+        self.assertEqual(killed.returncode, 79)
+        result = __import__("subprocess").run(
+            [sys.executable, str(Path(r2a0.__file__)), "verify", "--evidence-dir", str(self.root)],
+            env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("ORPHAN_MERGE_INTENT", result.stderr)
+
+    def test_orphan_marker_refuses_new_journal_append(self):
+        self._reserve()
+        with self.assertRaisesRegex(ValueError, "ORPHAN_MERGE_INTENT"):
+            self.journal.append("manual", "other", b"bad continuation")
+
+    def test_valid_marker_and_matching_ledger_record_read_ok(self):
+        self._reserve()
+        self.journal.append("merge-intent", "local", self.raw, {"scenario": "Sc1"})
+        self.assertEqual(len(self.journal.read()), 1)
+        self.journal.append("merge-attempt", "gh-api", b"unknown")
+        self.assertEqual(len(self.journal.read()), 2)
+
+    def test_missing_marker_after_commit_holds(self):
+        self._reserve()
+        self.journal.append("merge-intent", "local", self.raw)
+        self.marker.unlink()
+        with self.assertRaisesRegex(ValueError, "MISSING_OR_MODIFIED_MERGE_INTENT"):
+            self.journal.read()
+
+    def test_tampered_marker_after_commit_holds(self):
+        self._reserve()
+        self.journal.append("merge-intent", "local", self.raw)
+        self.marker.write_bytes(self.raw + b" ")
+        with self.assertRaisesRegex(ValueError, "INVALID_MERGE_INTENT_MARKER"):
+            self.journal.read()
+
+    def test_bad_marker_name_and_bytes_hold(self):
+        self.marker.parent.mkdir(exist_ok=True)
+        self.marker.with_name("bad.json").write_bytes(self.raw)
+        with self.assertRaisesRegex(ValueError, "INVALID_MERGE_INTENT_MARKER"):
+            self.journal.read()
+
+    def test_merge_intent_record_without_marker_is_forbidden(self):
+        with self.assertRaisesRegex(ValueError, "MISSING_PENDING_MERGE_INTENT"):
+            self.journal.append("merge-intent", "local", self.raw)
+
+    def test_missing_marker_directory_after_commit_holds(self):
+        self._reserve()
+        self.journal.append("merge-intent", "local", self.raw)
+        self.marker.unlink()
+        self.marker.parent.rmdir()
+        with self.assertRaisesRegex(ValueError, "MISSING_OR_MODIFIED_MERGE_INTENT"):
+            self.journal.read()
+
+class TestV04MergeIntentCrashMatrix(unittest.TestCase):
+    def test_crash_after_committed_intent_before_network_never_reserves_twice(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as directory:
+            code = '''import os,sys
+from pathlib import Path
+import r2a0
+intent={"repo":r2a0.LAB_REPO,"pr":22,"head":"a"*40,"base":"experiment/r2a0-crash","scenario":"Sc1"}
+raw=r2a0.canonical(intent)
+r2a0.write_once(Path(sys.argv[1])/'merge_intents'/(r2a0.digest(raw)+'.json'),raw)
+r2a0.EvidenceJournal(Path(sys.argv[1])).append('merge-intent','local',raw)
+os._exit(81)
+'''
+            env = dict(os.environ, PYTHONPATH=str(Path(r2a0.__file__).parent))
+            child = subprocess.run([sys.executable, '-c', code, directory], env=env,
+                                   capture_output=True, timeout=10)
+            self.assertEqual(child.returncode, 81)
+            root = Path(directory)
+            j = r2a0.EvidenceJournal(root)
+            self.assertEqual([r['event'] for r in j.read()], ['merge-intent'])
+            raw = (next((root/'merge_intents').iterdir())).read_bytes()
+            with self.assertRaises(FileExistsError):
+                r2a0.write_once(root/'merge_intents'/(r2a0.digest(raw)+'.json'),raw)
+            self.assertEqual(len(j.read()), 1)
+
+    def test_receiving_webhook_while_orphan_intent_exists_is_not_202(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            secret=b'test-only-secret-key-32-bytes-long!'
+            j=r2a0.EvidenceJournal(root)
+            intent={"repo":r2a0.LAB_REPO,"pr":22,"head":"a"*40,
+                    "base":"experiment/r2a0-crash","scenario":"Sc1"}
+            raw=r2a0.canonical(intent)
+            r2a0.write_once(root/'merge_intents'/(r2a0.digest(raw)+'.json'),raw)
+            srv=r2a0.make_server(j,secret,'127.0.0.1',0)
+            t=threading.Thread(target=srv.serve_forever,daemon=True)
+            t.start()
+            try:
+                body=json.dumps({'repository':{'full_name':r2a0.LAB_REPO},'action':'created'}).encode()
+                sig='sha256='+hmac.new(secret,body,hashlib.sha256).hexdigest()
+                conn=HTTPConnection('127.0.0.1',srv.server_address[1],timeout=2)
+                conn.request('POST','/github-webhook',body,{'X-Hub-Signature-256':sig})
+                response=conn.getresponse(); response.read(); conn.close()
+                self.assertEqual(response.status,503)
+            finally:
+                srv.shutdown();srv.server_close();t.join(timeout=2)
+
+    def test_root_symlinked_merge_marker_directory_denied(self):
+        if not hasattr(os,'symlink'):
+            self.skipTest('no symlink support')
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); outside=root/'outside';outside.mkdir()
+            try:
+                (root/'merge_intents').symlink_to(outside,target_is_directory=True)
+            except (OSError,NotImplementedError):
+                self.skipTest('no symlink permissions')
+            with self.assertRaisesRegex(ValueError,'SYMLINK_EVIDENCE_SUBDIRECTORY'):
+                r2a0.EvidenceJournal(root).read()

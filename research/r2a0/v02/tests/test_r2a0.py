@@ -554,21 +554,21 @@ os._exit(79)
 
     def test_valid_marker_and_matching_ledger_record_read_ok(self):
         self._reserve()
-        self.journal.append("merge-intent", "local", self.raw, {"scenario": "Sc1"})
+        self.journal._append_merge_intent_raw(self.raw, {"scenario": "Sc1"})
         self.assertEqual(len(self.journal.read()), 1)
         self.journal.append("merge-attempt", "gh-api", b"unknown")
         self.assertEqual(len(self.journal.read()), 2)
 
     def test_missing_marker_after_commit_holds(self):
         self._reserve()
-        self.journal.append("merge-intent", "local", self.raw)
+        self.journal._append_merge_intent_raw(self.raw)
         self.marker.unlink()
         with self.assertRaisesRegex(ValueError, "MISSING_OR_MODIFIED_MERGE_INTENT"):
             self.journal.read()
 
     def test_tampered_marker_after_commit_holds(self):
         self._reserve()
-        self.journal.append("merge-intent", "local", self.raw)
+        self.journal._append_merge_intent_raw(self.raw)
         self.marker.write_bytes(self.raw + b" ")
         with self.assertRaisesRegex(ValueError, "INVALID_MERGE_INTENT_MARKER"):
             self.journal.read()
@@ -581,11 +581,11 @@ os._exit(79)
 
     def test_merge_intent_record_without_marker_is_forbidden(self):
         with self.assertRaisesRegex(ValueError, "MISSING_PENDING_MERGE_INTENT"):
-            self.journal.append("merge-intent", "local", self.raw)
+            self.journal._append_merge_intent_raw(self.raw)
 
     def test_missing_marker_directory_after_commit_holds(self):
         self._reserve()
-        self.journal.append("merge-intent", "local", self.raw)
+        self.journal._append_merge_intent_raw(self.raw)
         self.marker.unlink()
         self.marker.parent.rmdir()
         with self.assertRaisesRegex(ValueError, "MISSING_OR_MODIFIED_MERGE_INTENT"):
@@ -601,7 +601,7 @@ import r2a0
 intent={"repo":r2a0.LAB_REPO,"pr":22,"head":"a"*40,"base":"experiment/r2a0-crash","scenario":"Sc1"}
 raw=r2a0.canonical(intent)
 r2a0.write_once(Path(sys.argv[1])/'merge_intents'/(r2a0.digest(raw)+'.json'),raw)
-r2a0.EvidenceJournal(Path(sys.argv[1])).append('merge-intent','local',raw)
+r2a0.EvidenceJournal(Path(sys.argv[1]))._append_merge_intent_raw(raw)
 os._exit(81)
 '''
             env = dict(os.environ, PYTHONPATH=str(Path(r2a0.__file__).parent))
@@ -672,7 +672,7 @@ class TestRecoveryV05(unittest.TestCase):
 
     def recorded(self):
         self.orphan()
-        self.j.append("merge-intent", "local", self.raw)
+        self.j._append_merge_intent_raw(self.raw)
 
     def test_orphan_inspection_holds_and_reads_only(self):
         self.j.append("manual", "fixture", b"old valid event")
@@ -814,7 +814,7 @@ class TestRecoveryV05(unittest.TestCase):
         new = dict(self.intent,pr=23)
         raw=r2a0.canonical(new)
         r2a0.write_once(self.root / "merge_intents" / (r2a0.digest(raw)+".json"), raw)
-        self.j.append("merge-intent","local",raw)
+        self.j._append_merge_intent_raw(raw)
         with patch.object(r2a0, "gh_api") as gh:
             with self.assertRaisesRegex(ValueError,"REMOTE_INSPECTION_REQUIRES_SINGLE_INTENT"):
                 r2a0.inspect_merge_recovery(self.j, remote=True)
@@ -867,7 +867,7 @@ class TestRecoveryCliGuardsV05(unittest.TestCase):
     def test_no_blind_retry_even_if_scenario_changes(self):
         raw=self.raw
         r2a0.write_once(self.root/"merge_intents"/(r2a0.digest(raw)+".json"),raw)
-        self.j.append("merge-intent","local",raw)
+        self.j._append_merge_intent_raw(raw)
         with patch.dict(os.environ,{"ARIO_R2A0_DISPOSABLE_MERGE_ACK":"EXPLICITLY_ALLOW_LAB_MERGE"}),patch.object(r2a0,"authorized_merge") as merge:
             ret=r2a0.main(["attempt-merge","--pr","22","--scenario","Sc2","--base","experiment/r2a0-crash","--expected-head","a"*40,"--execute","--evidence-dir",str(self.root)])
             self.assertEqual(ret,2)
@@ -879,7 +879,7 @@ class TestRecoveryCliGuardsV05(unittest.TestCase):
         import contextlib,io
         raw=self.raw
         r2a0.write_once(self.root/"merge_intents"/(r2a0.digest(raw)+".json"),raw)
-        self.j.append("merge-intent","local",raw)
+        self.j._append_merge_intent_raw(raw)
         output=io.StringIO()
         with contextlib.redirect_stdout(output):
             self.assertEqual(r2a0.main(["verify","--evidence-dir",str(self.root)]),0)
@@ -941,23 +941,24 @@ worker=sys.argv[3]; gate=Path(sys.argv[5]); crash=sys.argv[6]=='crash'
 def fail_if_network(*a, **kw):
     raise AssertionError('RECOVERY_MUST_NEVER_CALL_GITHUB')
 r2a0.gh_api=fail_if_network
-orig_append=r2a0.EvidenceJournal.append
+# F9 uses the documented PRIVATE raw helper for this historical fault fixture.
+# The public merge-intent sink now requires a coordinator; do not bypass it in production.
+orig_append=r2a0.EvidenceJournal._append_merge_intent_raw
 orig_write=r2a0.write_once
 
-def wait_append(self,event,source,data,meta=None):
-    if event=='merge-intent':
-        orig_write(gate/(worker+'.ready'),b'PASSED_ORPHAN_PREFLIGHT')
-        until=time.monotonic()+8
-        while not (gate/'GO').exists():
-            if time.monotonic()>until: raise TimeoutError('BARRIER_TIMEOUT')
-            time.sleep(.005)
-    return orig_append(self,event,source,data,meta)
+def wait_append(self,data,meta=None):
+    orig_write(gate/(worker+'.ready'),b'PASSED_ORPHAN_PREFLIGHT')
+    until=time.monotonic()+8
+    while not (gate/'GO').exists():
+        if time.monotonic()>until: raise TimeoutError('BARRIER_TIMEOUT')
+        time.sleep(.005)
+    return orig_append(self,data,meta)
 
 def abort_after_claim(path,data):
     orig_write(path,data)
     if Path(path).parent.name=='claims':
         os._exit(73)
-r2a0.EvidenceJournal.append=wait_append
+r2a0.EvidenceJournal._append_merge_intent_raw=wait_append
 if crash:
     r2a0.write_once=abort_after_claim
 try:

@@ -237,13 +237,61 @@ class EvidenceJournal:
         self._check_merge_intents(records, _pending_merge_intent)
         return records
 
-    def append(self, event: str, source: str, data: bytes, meta: dict | None = None) -> dict:
+    def append(self, event: str, source: str, data: bytes, meta: dict | None = None, *,
+               merge_intent_authority=None) -> dict:
+        """Public sink: local journal integrity does not imply merge authority."""
+        if event == "merge-intent":
+            if source != "local":
+                raise ValueError("INVALID_MERGE_INTENT_JOURNAL_SOURCE")
+            return self.append_merge_intent(data, authority=merge_intent_authority, meta=meta)
+        return self._append_generic(event, source, data, meta)
+
+    def append_merge_intent(self, data: bytes, *, authority, meta: dict | None = None) -> dict:
+        """Requires a claim re-read from one named preinitialized SQLite DB."""
+        from f7_coordinator import verify_intent_authority
+        verify_intent_authority(authority, data)
+        return self._append_merge_intent_raw(data, meta)
+
+    def _append_merge_intent_raw(self, data: bytes, meta: dict | None = None) -> dict:
+        """PRIVATE same-owner lab writer; intentionally NOT an authority boundary."""
         if len(data) > MAX_WEBHOOK * 4:
             raise ValueError("Evidence payload too large")
         with self.lock:
-            if event == "merge-intent" and source != "local":
-                raise ValueError("INVALID_MERGE_INTENT_JOURNAL_SOURCE")
-            prior = self.read(_pending_merge_intent=data if event == "merge-intent" else None)
+            prior = self.read(_pending_merge_intent=data)
+            seq = len(prior) + 1
+            h = digest(data)
+            rel = Path("objects") / f"{seq:06d}-{h}.bin"
+            previous = prior[-1]["record_hash"] if prior else "0" * 64
+            item = {"seq": seq, "received_utc": utc_now(), "event": "merge-intent",
+                    "source": "local", "meta": meta or {}, "payload_path": rel.as_posix(),
+                    "payload_sha256": h, "prev_hash": previous}
+            item["record_hash"] = digest(canonical(item))
+            claim = {"seq": seq, "prev_hash": previous, "payload_sha256": h,
+                     "record_hash": item["record_hash"]}
+            # First create a durable unique intent. Competing processes and
+            # restarts after an incomplete write MUST NOT retry this slot.
+            write_once(self.root / "claims" / f"{seq:06d}.json", canonical(claim))
+            write_once(self.root / rel, data)
+            self.root.mkdir(parents=True, exist_ok=True)
+            is_new_index = not self.index.exists()
+            with self.index.open("ab") as f:
+                f.write(canonical(item) + b"\n")
+                f.flush()
+                os.fsync(f.fileno())
+            if is_new_index and os.name == "posix":
+                fd = os.open(self.root, os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            return item
+
+
+    def _append_generic(self, event: str, source: str, data: bytes, meta: dict | None = None) -> dict:
+        if len(data) > MAX_WEBHOOK * 4:
+            raise ValueError("Evidence payload too large")
+        with self.lock:
+            prior = self.read()
             seq = len(prior) + 1
             h = digest(data)
             rel = Path("objects") / f"{seq:06d}-{h}.bin"
@@ -408,7 +456,7 @@ def inspect_merge_recovery(journal: EvidenceJournal, *, marker_sha256: str | Non
             "records": len(rows), "intents": entries}
 
 
-def _append_orphan_after_claim_internal(journal: EvidenceJournal, marker_sha256: str, *, ack: str) -> dict:
+def _append_orphan_after_claim_internal(journal: EvidenceJournal, marker_sha256: str, *, ack: str, authority=None) -> dict:
     """Explicit evidence-preserving append, NEVER a GitHub write/retry.
 
     This records that the reserved marker existed after an interruption.
@@ -430,11 +478,12 @@ def _append_orphan_after_claim_internal(journal: EvidenceJournal, marker_sha256:
     journal._validated_merge_intent(raw)
     if digest(raw) != marker_sha256:
         raise ValueError("MARKER_CHANGED_DURING_RECOVERY")
-    record = journal.append("merge-intent", "local", raw,
-                            {"recovery": "ORPHAN_MARKER_RECORDED_AFTER_CRASH",
-                             "remote_effect": "UNKNOWN",
-                             "remote_put_retried": False,
-                             "original_marker_sha256": marker_sha256})
+    meta = {"recovery": "ORPHAN_MARKER_RECORDED_AFTER_CRASH",
+            "remote_effect": "UNKNOWN", "remote_put_retried": False,
+            "original_marker_sha256": marker_sha256}
+    # Legacy private research fixtures intentionally use the raw helper.
+    record = (journal._append_merge_intent_raw(raw, meta) if authority is None else
+              journal.append_merge_intent(raw, authority=authority, meta=meta))
     return {"status": "HOLD_OUTCOME_UNKNOWN", "action": "APPENDED_RECOVERY_EVIDENCE_ONLY",
             "record_seq": record["seq"], "record_hash": record["record_hash"],
             "remote_merge_retry": "FORBIDDEN"}
@@ -682,6 +731,8 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--expected-head", required=True)
     a.add_argument("--execute", action="store_true")
     a.add_argument("--evidence-dir", type=Path, default=Path("evidence"))
+    a.add_argument("--db", type=Path, default=None, help="Preinitialized shared SQLite DB, required with --execute")
+    a.add_argument("--root-label", default=None, help="Stable provenance label, required with --execute")
     w = sub.add_parser("listen", help="127.0.0.1 lab-only HMAC receiver; requires GH_WEBHOOK_SECRET")
     w.add_argument("--listen", default="127.0.0.1")
     w.add_argument("--port", type=int, default=8765)
@@ -737,10 +788,23 @@ def main(argv: list[str] | None = None) -> int:
                     raise ValueError("PREVIOUS_MERGE_INTENT_HOLD_USE_NEW_EVIDENCE_DIR")
                 intent = {"repo": LAB_REPO, "pr": args.pr, "head": args.expected_head,
                           "base": args.base, "scenario": args.scenario}
-                name = digest(canonical(intent)) + ".json"
-                write_once(journal.root / "merge_intents" / name, canonical(intent))
+                # A durable, uniquely scoped claim BEFORE any local intent or network effect.
+                if args.db is None or args.root_label is None:
+                    raise PermissionError("COORDINATOR_REQUIRED_FOR_MERGE_INTENT")
+                from f7_coordinator import SharedCoordinator, mint_intent_authority
+                coordinator = SharedCoordinator(args.db)
+                marker = digest(canonical(intent))
+                # Failure to access preinitialized coordinator is HOLD, not fallback.
+                claim = coordinator.claim(intent, marker, args.root_label)
+                if not claim.get("claim_recorded"):
+                    print(json.dumps(claim, sort_keys=True))
+                    return 2
+                authority = mint_intent_authority(coordinator, intent, marker, args.root_label)
+                write_once(journal.root / "merge_intents" / (marker + ".json"), canonical(intent))
                 journal.append("merge-intent", "local", canonical(intent),
-                               {"scenario": args.scenario, "pr": args.pr})
+                               {"scenario": args.scenario, "pr": args.pr, "root_label": args.root_label},
+                               merge_intent_authority=authority)
+                coordinator.record_local_observation(intent, marker, args.root_label)
             response = authorized_merge(LAB_REPO, args.pr, args.expected_head, args.base, execute=args.execute)
             item = journal.append("merge-attempt", "gh-api", canonical(response), {"scenario": args.scenario, "pr": args.pr, "expected_head": args.expected_head, "base": args.base, "execute": args.execute})
             print(json.dumps({"result": response, "journal_seq": item["seq"]}))

@@ -109,3 +109,7 @@ Use a **new** `--evidence-dir` for v0.2. Do not migrate or delete old v0.1 evide
 When `attempt-merge --execute` is used, an exact merge intent marker under `merge_intents/` and a journal intent are written before the GitHub PUT. An ambiguous result must be reconciled read-only; the same intent must never be retried automatically. This is a lab-only defensive marker, not multi-host locking.
 
 An empty journal now prints `NO_JOURNAL` or `EMPTY_JOURNAL`, not `PASS`. A complete REST fetch sequence prints `api_reads_complete=true` while `complete_observation=false`: review-thread and historical webhook completeness remain unproven. No command in this kit creates, updates, or signs GitHub App Check Runs.
+
+## F4: read-only inspection and deliberately manual orphan adoption
+
+On HOLD, **do not erase the marker or rerun `attempt-merge`**. Capture an offline copy and checksum of the directory; inspect via `inspect-recovery --evidence-dir DIR`. An orphan marker's original SHA-256 is the identifier. If and only if all original evidence other than one valid marker is intact, `record-orphan --marker-sha256 H --ack RECORD_ORPHAN_ONLY_NO_MERGE_RETRY` may append the recovered `merge-intent` event while preserving the marker; outcome remains UNKNOWN. Optional `inspect-recovery --marker-sha256 H --remote` uses a single GitHub GET and never permits a retry. Evidence directories are single-use for native merge probes. All claim/object/index corruption remains HOLD for manual forensic review; no repair or retry is authorized. See `F4_SAFE_HOLD_RECOVERY_REVIEW.md`.

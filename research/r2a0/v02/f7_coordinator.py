@@ -12,6 +12,7 @@ must use the SAME database. A copy/restore can fork authority.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from contextlib import closing
 import hashlib
 import json
@@ -85,14 +86,15 @@ class SharedCoordinator:
             raise
         return coord
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self, *, readonly: bool = False) -> sqlite3.Connection:
         self._safe_file()
         # mode=rw explicitly refuses database creation. URI is quoted via as_uri.
-        uri = self.filename.resolve(strict=True).as_uri() + "?mode=rw"
+        uri = self.filename.resolve(strict=True).as_uri() + ("?mode=ro" if readonly else "?mode=rw")
         db = sqlite3.connect(uri, uri=True, timeout=0.5, isolation_level=None)
         try:
             db.execute("PRAGMA busy_timeout=500")
-            db.execute("PRAGMA synchronous=FULL")
+            if not readonly:
+                db.execute("PRAGMA synchronous=FULL")
             if db.execute("PRAGMA user_version").fetchone()[0] != DB_VERSION:
                 raise ValueError("COORDINATOR_SCHEMA_VERSION_MISMATCH")
             objects = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -168,6 +170,60 @@ class SharedCoordinator:
             raise ValueError("COORDINATOR_UNAVAILABLE_OR_CORRUPT") from exc
 
 
+
+@dataclass(frozen=True)
+class MergeIntentAuthority:
+    """Evidence-bound pointer to a *local* SQLite claim, NOT a capability or secret.
+
+    Anyone with the same owner's filesystem rights can forge/copy this structure,
+    modify the DB or call raw journal methods. Never call this an OS security gate.
+    """
+    db_path: str
+    repo: str
+    pr: int
+    marker: str
+    root_label: str
+
+
+def mint_intent_authority(coordinator: SharedCoordinator, intent: dict,
+                          marker: str, root_label: str) -> MergeIntentAuthority:
+    """Re-read an existing CLAIMED row; do not grant/mint a new claim."""
+    if not isinstance(coordinator, SharedCoordinator):
+        raise PermissionError("INVALID_MERGE_INTENT_AUTHORITY")
+    token = MergeIntentAuthority(str(coordinator.filename), intent.get("repo"),
+                                 intent.get("pr"), marker, root_label)
+    verify_intent_authority(token, canonical(intent))
+    return token
+
+
+def verify_intent_authority(authority: object, data: bytes) -> None:
+    """Fail-closed, read-only database observation; not cross-host proof.
+
+    It deliberately does NOT treat the journal hash chain as authority.
+    An appending process must already have a durable claim for exact intent.
+    """
+    if type(authority) is not MergeIntentAuthority:
+        raise PermissionError("INVALID_MERGE_INTENT_AUTHORITY")
+    try:
+        intent = EvidenceJournal._validated_merge_intent(data)
+        if (authority.repo != intent["repo"] or authority.pr != intent["pr"] or
+            authority.marker != digest(data) or not isinstance(authority.root_label, str) or
+            not re.fullmatch(r"[A-Za-z0-9_-]{1,50}", authority.root_label)):
+            raise PermissionError("INVALID_MERGE_INTENT_AUTHORITY")
+        coordinator = SharedCoordinator(Path(authority.db_path))
+        with closing(coordinator._connect(readonly=True)) as db:
+            stored = db.execute("SELECT marker,root_label FROM claims WHERE repo=? AND pr=?",
+                                (authority.repo, authority.pr)).fetchone()
+            if stored != (authority.marker, authority.root_label):
+                raise PermissionError("INVALID_MERGE_INTENT_AUTHORITY")
+            phases = [row[0] for row in db.execute(
+                "SELECT phase FROM events WHERE repo=? AND pr=? AND marker=? AND root_label=?",
+                (authority.repo, authority.pr, authority.marker, authority.root_label))]
+            if phases.count("CLAIMED") != 1 or "LOCAL_EVIDENCE_RECORDED" in phases:
+                raise PermissionError("INVALID_MERGE_INTENT_AUTHORITY")
+    except (ValueError, OSError, sqlite3.Error, KeyError, TypeError) as exc:
+        raise PermissionError("INVALID_MERGE_INTENT_AUTHORITY") from exc
+
 def adopt_with_shared_coordinator(journal: EvidenceJournal, coordinator: SharedCoordinator,
                                   marker: str, *, root_label: str, ack: str,
                                   after_claim=None) -> dict:
@@ -191,7 +247,8 @@ def adopt_with_shared_coordinator(journal: EvidenceJournal, coordinator: SharedC
     if after_claim is not None:
         after_claim()  # Fault injection in local tests only; can hard-crash.
     try:
-        local = _append_orphan_after_claim_internal(journal, marker, ack=ack)
+        authority = mint_intent_authority(coordinator, chosen["intent"], marker, root_label)
+        local = _append_orphan_after_claim_internal(journal, marker, ack=ack, authority=authority)
     except Exception:
         # Persistent global claim is never undone or transferred automatically.
         raise

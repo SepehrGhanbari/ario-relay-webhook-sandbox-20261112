@@ -50,6 +50,15 @@ def ensure_lab(repo: str) -> None:
         raise ValueError(f"Refusing non-allowlisted repository: {repo!r}")
 
 
+def ensure_lab_base_ref(ref: str) -> None:
+    """Allow one flat, explicitly isolated experimental base branch.
+
+    Do not accept nested paths or ambiguous percent/dot encodings from API data.
+    """
+    if not isinstance(ref, str) or not re.fullmatch(r"experiment/r2a0-[A-Za-z0-9_-]{1,72}", ref):
+        raise ValueError("Only flat experiment/r2a0-* lab base refs are supported")
+
+
 def ensure_scenario(s: str) -> None:
     if s not in SCENARIOS:
         raise ValueError(f"Unknown R2a-0 scenario: {s!r}")
@@ -233,9 +242,16 @@ def parse_gh_response(raw: bytes, returncode: int, method: str) -> dict:
 
 def gh_api(path: str, *, method: str = "GET", payload: dict | None = None) -> dict:
     """Uses local gh authorization only. Never prints tokens or sends secrets elsewhere."""
-    if not path.startswith("repos/" + LAB_REPO + "/") or any(
-        suspicious in path.lower() for suspicious in ("..", "%2e", "\\", "//", "%2f")
-    ):
+    # Percent-encoded slash is needed for GitHub's branch-name path parameter,
+    # but is forbidden everywhere except the exact, read-only rules endpoint.
+    # Reject double encoding, dot encoding, and all other ambiguous escapes.
+    allowed_rules_path = bool(re.fullmatch(
+        r"repos/" + re.escape(LAB_REPO) +
+        r"/rules/branches/experiment%2[Ff]r2a0-[A-Za-z0-9_-]{1,72}", path
+    ))
+    if (not path.startswith("repos/" + LAB_REPO + "/") or
+        any(bad in path.lower() for bad in ("..", "%2e", "%25", "\\", "//")) or
+        ("%2f" in path.lower() and not allowed_rules_path)):
         raise ValueError("GitHub API path outside approved lab repository")
     if method not in ("GET", "PUT"):
         raise ValueError("This lab only supports GET or guarded merge PUT")
@@ -286,6 +302,7 @@ def snapshot(repo: str, pr_number: int) -> dict:
     head = p["head"]["sha"]
     ensure_sha(head)
     base_ref = p["base"]["ref"]
+    ensure_lab_base_ref(base_ref)
     data = {
         "snapshot_utc": utc_now(), "repo": repo, "number": pr_number,
         "head_sha": head, "base_sha": p["base"]["sha"], "base_ref": base_ref,
@@ -316,8 +333,9 @@ def snapshot(repo: str, pr_number: int) -> dict:
 def authorized_merge(repo: str, pr_number: int, expected_head: str, base_ref: str, *, execute: bool = False) -> dict:
     ensure_lab(repo)
     ensure_sha(expected_head)
-    if not base_ref.startswith(BASE_PREFIX) or base_ref == "main" or pr_number < 1:
-        raise ValueError("Only an experiment/r2a0-* base branch may be tested")
+    ensure_lab_base_ref(base_ref)
+    if pr_number < 1:
+        raise ValueError("Only a positive lab PR number may be tested")
     current = gh_api(f"repos/{repo}/pulls/{pr_number}")
     if not current["_request_ok"]:
         return {"status": "UNKNOWN", "reason": "PR_PREFLIGHT_UNAVAILABLE"}

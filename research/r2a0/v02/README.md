@@ -46,3 +46,7 @@ The CLI uses *append-only local* evidence, not a WORM ledger. Its tail can be tr
 The receiver binds only to `127.0.0.1`. It accepts GitHub-compatible HMAC payloads, but **GitHub cannot deliver directly to a private loopback address**; a separately authorized HTTPS ingress/tunnel would be needed for live webhook tests. Until then, use it for loopback HMAC tests and classify webhook coverage as **NOT TESTED LIVE**.
 
 Refer to the runbook for the guarded native merge attempt and capture procedure.
+
+## F4 safe recovery (2026-11-17)
+
+Use `python r2a0.py inspect-recovery --evidence-dir DIR` for an evidence-preserving HOLD report. For **one valid orphan merge marker only**, `record-orphan --evidence-dir DIR --marker-sha256 H --ack RECORD_ORPHAN_ONLY_NO_MERGE_RETRY` explicitly appends the missing observation but never retries the native merge. `inspect-recovery --remote --marker-sha256 H` performs only a scoped GET and does not establish who merged. A recovered journal is **not** merge authorization; see `F4_SAFE_HOLD_RECOVERY_REVIEW.md`.

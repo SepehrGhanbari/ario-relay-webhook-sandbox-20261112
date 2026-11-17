@@ -114,16 +114,78 @@ class EvidenceJournal:
     def _safe_root(self) -> None:
         if self.root.is_symlink() or self.index.is_symlink():
             raise ValueError("SYMLINK_EVIDENCE_ROOT_OR_INDEX")
-        for sub in ("objects", "claims"):
+        for sub in ("objects", "claims", "merge_intents"):
             if (self.root / sub).is_symlink():
                 raise ValueError("SYMLINK_EVIDENCE_SUBDIRECTORY")
 
-    def read(self) -> list[dict]:
+    @staticmethod
+    def _validated_merge_intent(raw: bytes) -> dict:
+        # The journal records *exactly* the intent that was durably reserved.
+        # A generic hash-chain check is not sufficient for independent markers.
+        if len(raw) > 4096:
+            raise ValueError("INVALID_MERGE_INTENT_MARKER")
+        try:
+            intent = json.loads(raw, object_pairs_hook=strict_json_object)
+            if not isinstance(intent, dict) or set(intent) != {"repo", "pr", "head", "base", "scenario"}:
+                raise ValueError("schema")
+            if canonical(intent) != raw:
+                raise ValueError("not canonical")
+            ensure_lab(intent["repo"])
+            if type(intent["pr"]) is not int or intent["pr"] < 1:
+                raise ValueError("bad pr")
+            ensure_sha(intent["head"])
+            ensure_lab_base_ref(intent["base"])
+            ensure_scenario(intent["scenario"])
+        except (ValueError, TypeError, KeyError, UnicodeDecodeError) as exc:
+            raise ValueError("INVALID_MERGE_INTENT_MARKER") from exc
+        return intent
+
+    def _check_merge_intents(self, records: list[dict], pending: bytes | None) -> None:
+        d = self.root / "merge_intents"
+        if d.is_symlink() or (d.exists() and not d.is_dir()):
+            raise ValueError("INVALID_MERGE_INTENT_MARKER")
+        reserved: dict[str, bytes] = {}
+        if d.exists():
+            for path in d.iterdir():
+                if path.is_symlink() or not path.is_file() or path.stat().st_size > 4096:
+                    raise ValueError("INVALID_MERGE_INTENT_MARKER")
+                raw = path.read_bytes()
+                self._validated_merge_intent(raw)
+                if path.name != digest(raw) + ".json":
+                    raise ValueError("INVALID_MERGE_INTENT_MARKER")
+                reserved[path.name] = raw
+        committed: dict[str, bytes] = {}
+        for record in records:
+            if record["event"] != "merge-intent":
+                continue
+            if record["source"] != "local":
+                raise ValueError("INVALID_MERGE_INTENT_JOURNAL_SOURCE")
+            raw = (self.root / record["payload_path"]).read_bytes()
+            self._validated_merge_intent(raw)
+            name = digest(raw) + ".json"
+            if name in committed:
+                raise ValueError("DUPLICATE_MERGE_INTENT_IN_JOURNAL")
+            committed[name] = raw
+        for name, raw in committed.items():
+            if reserved.get(name) != raw:
+                raise ValueError("MISSING_OR_MODIFIED_MERGE_INTENT")
+        uncommitted = set(reserved).difference(committed)
+        if pending is None:
+            if uncommitted:
+                raise ValueError("ORPHAN_MERGE_INTENT")
+        else:
+            self._validated_merge_intent(pending)
+            expected = digest(pending) + ".json"
+            if uncommitted != {expected} or reserved.get(expected) != pending:
+                raise ValueError("MISSING_PENDING_MERGE_INTENT")
+
+    def read(self, *, _pending_merge_intent: bytes | None = None) -> list[dict]:
         self._safe_root()
         if not self.index.exists():
             for sub in ("objects", "claims"):
                 if (self.root / sub).exists() and any((self.root / sub).iterdir()):
                     raise ValueError("ORPHAN_EVIDENCE_WITHOUT_INDEX")
+            self._check_merge_intents([], _pending_merge_intent)
             return []
 
         original = self.index.read_bytes()
@@ -172,13 +234,16 @@ class EvidenceJournal:
             actual = {item.name for item in d.iterdir()} if d.exists() else set()
             if actual != expected:
                 raise ValueError(f"ORPHAN_OR_MISSING_{sub.upper()}")
+        self._check_merge_intents(records, _pending_merge_intent)
         return records
 
     def append(self, event: str, source: str, data: bytes, meta: dict | None = None) -> dict:
         if len(data) > MAX_WEBHOOK * 4:
             raise ValueError("Evidence payload too large")
         with self.lock:
-            prior = self.read()
+            if event == "merge-intent" and source != "local":
+                raise ValueError("INVALID_MERGE_INTENT_JOURNAL_SOURCE")
+            prior = self.read(_pending_merge_intent=data if event == "merge-intent" else None)
             seq = len(prior) + 1
             h = digest(data)
             rel = Path("objects") / f"{seq:06d}-{h}.bin"

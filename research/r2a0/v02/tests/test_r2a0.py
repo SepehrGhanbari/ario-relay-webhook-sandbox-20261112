@@ -695,9 +695,9 @@ class TestRecoveryV05(unittest.TestCase):
         prior = self.j.append("manual", "fixture", b"immutable")
         self.orphan()
         with self.assertRaises(PermissionError):
-            r2a0.adopt_single_orphan_intent(self.j, self.marker_hash, ack="")
+            r2a0._append_orphan_after_claim_internal(self.j, self.marker_hash, ack="")
         with patch.object(r2a0, "gh_api") as gh:
-            result = r2a0.adopt_single_orphan_intent(
+            result = r2a0._append_orphan_after_claim_internal(
                 self.j, self.marker_hash, ack="RECORD_ORPHAN_ONLY_NO_MERGE_RETRY")
             gh.assert_not_called()
         self.assertEqual(result["status"], "HOLD_OUTCOME_UNKNOWN")
@@ -714,9 +714,9 @@ class TestRecoveryV05(unittest.TestCase):
     def test_adoption_twice_never_duplicates(self):
         self.orphan()
         ack = "RECORD_ORPHAN_ONLY_NO_MERGE_RETRY"
-        r2a0.adopt_single_orphan_intent(self.j, self.marker_hash, ack=ack)
+        r2a0._append_orphan_after_claim_internal(self.j, self.marker_hash, ack=ack)
         with self.assertRaisesRegex(ValueError, "NOT_A_SINGLE_SAFE_TO_RECORD_ORPHAN"):
-            r2a0.adopt_single_orphan_intent(self.j, self.marker_hash, ack=ack)
+            r2a0._append_orphan_after_claim_internal(self.j, self.marker_hash, ack=ack)
         self.assertEqual(len(self.j.read()), 1)
 
     def test_unrelated_orphan_claim_blocks_recovery(self):
@@ -725,7 +725,7 @@ class TestRecoveryV05(unittest.TestCase):
         with self.assertRaises(ValueError):
             r2a0.inspect_merge_recovery(self.j)
         with self.assertRaises(ValueError):
-            r2a0.adopt_single_orphan_intent(self.j, self.marker_hash,
+            r2a0._append_orphan_after_claim_internal(self.j, self.marker_hash,
                                            ack="RECORD_ORPHAN_ONLY_NO_MERGE_RETRY")
 
     def test_two_orphans_never_adopted(self):
@@ -736,7 +736,7 @@ class TestRecoveryV05(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "AMBIGUOUS_OR_UNRECOVERABLE_MERGE_INTENT"):
             r2a0.inspect_merge_recovery(self.j)
         with self.assertRaises(ValueError):
-            r2a0.adopt_single_orphan_intent(self.j, self.marker_hash,
+            r2a0._append_orphan_after_claim_internal(self.j, self.marker_hash,
                                            ack="RECORD_ORPHAN_ONLY_NO_MERGE_RETRY")
 
     def test_corrupt_marker_never_recorded(self):
@@ -745,14 +745,14 @@ class TestRecoveryV05(unittest.TestCase):
         with self.assertRaises(ValueError):
             r2a0.inspect_merge_recovery(self.j)
         with self.assertRaises(ValueError):
-            r2a0.adopt_single_orphan_intent(self.j, self.marker_hash,
+            r2a0._append_orphan_after_claim_internal(self.j, self.marker_hash,
                                            ack="RECORD_ORPHAN_ONLY_NO_MERGE_RETRY")
         self.assertFalse(self.j.index.exists())
 
     def test_wrong_hash_never_records(self):
         self.orphan()
         with self.assertRaisesRegex(ValueError, "NOT_A_SINGLE_SAFE_TO_RECORD_ORPHAN"):
-            r2a0.adopt_single_orphan_intent(self.j, "0"*64,
+            r2a0._append_orphan_after_claim_internal(self.j, "0"*64,
                                            ack="RECORD_ORPHAN_ONLY_NO_MERGE_RETRY")
         self.assertFalse(self.j.index.exists())
 
@@ -848,7 +848,7 @@ class TestRecoveryV05(unittest.TestCase):
         result=r2a0.inspect_merge_recovery(self.j)
         self.assertEqual(result["intents"][0]["journal_stage"],"ORPHAN_MARKER_NOT_JOURNALED")
         with patch.object(r2a0,"gh_api") as gh:
-            adopt=r2a0.adopt_single_orphan_intent(self.j,self.marker_hash,
+            adopt=r2a0._append_orphan_after_claim_internal(self.j,self.marker_hash,
                       ack="RECORD_ORPHAN_ONLY_NO_MERGE_RETRY")
             gh.assert_not_called()
         self.assertEqual(adopt["status"],"HOLD_OUTCOME_UNKNOWN")
@@ -899,7 +899,7 @@ class TestRecoveryCliGuardsV05(unittest.TestCase):
                 raise OSError("injected process interruption")
         with patch.object(r2a0,"write_once",side_effect=crash_after_claim),patch.object(r2a0,"gh_api") as gh:
             with self.assertRaises(OSError):
-                r2a0.adopt_single_orphan_intent(self.j,h,ack="RECORD_ORPHAN_ONLY_NO_MERGE_RETRY")
+                r2a0._append_orphan_after_claim_internal(self.j,h,ack="RECORD_ORPHAN_ONLY_NO_MERGE_RETRY")
             gh.assert_not_called()
         with self.assertRaises(ValueError):
             r2a0.inspect_merge_recovery(self.j)
@@ -961,7 +961,7 @@ r2a0.EvidenceJournal.append=wait_append
 if crash:
     r2a0.write_once=abort_after_claim
 try:
-    result=r2a0.adopt_single_orphan_intent(r2a0.EvidenceJournal(root),marker_hash,
+    result=r2a0._append_orphan_after_claim_internal(r2a0.EvidenceJournal(root),marker_hash,
         ack='RECORD_ORPHAN_ONLY_NO_MERGE_RETRY')
     print(json.dumps({'worker':worker,'outcome':'RECORDED','result':result}),flush=True)
 except Exception as e:

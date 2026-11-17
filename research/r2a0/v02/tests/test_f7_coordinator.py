@@ -2,7 +2,7 @@
 
 Tests deliberately contrast a single coordinator file with two separate files.
 They do not establish remote/network consensus, independent human custody,
-or enforcement against use of the legacy ungated CLI.
+or a security boundary against arbitrary same-owner Python code.
 """
 import hashlib
 import json
@@ -249,15 +249,17 @@ os._exit(78)'''
         self.assertEqual(second['reason'],'LOCAL_RECOVERY_RECORDED_GLOBAL_CLAIM_HELD_NO_MERGE_RETRY')
         self.assertEqual(self.coord.inspect(INTENT['repo'],38)['events'],['CLAIMED','LOCAL_EVIDENCE_RECORDED'])
 
-    def test_legacy_ungated_recording_still_bypasses_coordinator(self):
-        """Negative integration control: F7 is NOT mandatory in the old runtime."""
+    def test_legacy_public_recording_is_now_denied_and_cannot_bypass_coordinator(self):
+        """F8 RED/GREEN: old public API cannot append without the common DB."""
         marker=self._two_fixtures()
         first=f7.adopt_with_shared_coordinator(r2a0.EvidenceJournal(self.one),self.coord,marker,
                                               root_label='A',ack=f7.ACK)
         self.assertEqual(first['status'],'HOLD')
-        legacy=r2a0.adopt_single_orphan_intent(r2a0.EvidenceJournal(self.two),marker,ack=f7.ACK)
-        self.assertEqual(legacy['action'],'APPENDED_RECOVERY_EVIDENCE_ONLY')
-        self.assertEqual(compare(self.one,self.two)['status'],'HOLD_DUPLICATE_INTENT_ACROSS_ROOTS')
+        before=tree_hash(self.two)
+        with self.assertRaisesRegex(PermissionError,'COORDINATOR_REQUIRED'):
+            r2a0.adopt_single_orphan_intent(r2a0.EvidenceJournal(self.two),marker,ack=f7.ACK)
+        self.assertEqual(before,tree_hash(self.two))
+        self.assertEqual(r2a0.inspect_merge_recovery(r2a0.EvidenceJournal(self.two))['journal_integrity'],'HOLD_ORPHAN_INTENT')
 
     def test_explicit_ack_required_by_python_api(self):
         marker=fixture(self.one)

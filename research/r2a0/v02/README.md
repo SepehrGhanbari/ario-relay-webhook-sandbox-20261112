@@ -50,3 +50,14 @@ Refer to the runbook for the guarded native merge attempt and capture procedure.
 ## F4 safe recovery (2026-11-17)
 
 Use `python r2a0.py inspect-recovery --evidence-dir DIR` for an evidence-preserving HOLD report. For **one valid orphan merge marker only**, `record-orphan --evidence-dir DIR --marker-sha256 H --ack RECORD_ORPHAN_ONLY_NO_MERGE_RETRY` explicitly appends the missing observation but never retries the native merge. `inspect-recovery --remote --marker-sha256 H` performs only a scoped GET and does not establish who merged. A recovered journal is **not** merge authorization; see `F4_SAFE_HOLD_RECOVERY_REVIEW.md`.
+
+
+### F8 supported orphan recovery contract
+
+`record-orphan` and the public `adopt_single_orphan_intent` API now **require**
+one initialized shared SQLite coordinator (`--db` / `coordinator`) and a
+validated root label. Every recovery outcome, including evidence recorded,
+remains `HOLD / UNKNOWN`, with no automatic retry or native merge authority.
+The old uncoordinated append is kept as a private historical test fixture only;
+Python private names and filesystem permissions in the same user context are
+**not** a hostile-code security boundary. See `F8_MANDATORY_COORDINATOR_REVIEW.md`.

@@ -408,7 +408,7 @@ def inspect_merge_recovery(journal: EvidenceJournal, *, marker_sha256: str | Non
             "records": len(rows), "intents": entries}
 
 
-def adopt_single_orphan_intent(journal: EvidenceJournal, marker_sha256: str, *, ack: str) -> dict:
+def _append_orphan_after_claim_internal(journal: EvidenceJournal, marker_sha256: str, *, ack: str) -> dict:
     """Explicit evidence-preserving append, NEVER a GitHub write/retry.
 
     This records that the reserved marker existed after an interruption.
@@ -438,6 +438,25 @@ def adopt_single_orphan_intent(journal: EvidenceJournal, marker_sha256: str, *, 
     return {"status": "HOLD_OUTCOME_UNKNOWN", "action": "APPENDED_RECOVERY_EVIDENCE_ONLY",
             "record_seq": record["seq"], "record_hash": record["record_hash"],
             "remote_merge_retry": "FORBIDDEN"}
+
+
+def adopt_single_orphan_intent(journal: EvidenceJournal, marker_sha256: str, *,
+                               ack: str, coordinator=None, root_label: str | None = None) -> dict:
+    """Supported public recovery API; global coordinator is MANDATORY.
+
+    All supplied entry points share the single explicit preinitialized DB.
+    Python itself is not an isolation/security boundary: importing a private
+    helper or altering source can still bypass this; protected policy/external
+    evaluator are necessary for stronger guarantees.
+    """
+    if coordinator is None or root_label is None:
+        raise PermissionError("COORDINATOR_REQUIRED_FOR_RECOVERY")
+    # Deferred import avoids r2a0 <-> f7_coordinator module initialization cycle.
+    from f7_coordinator import SharedCoordinator, adopt_with_shared_coordinator
+    if not isinstance(coordinator, SharedCoordinator):
+        raise ValueError("INVALID_COORDINATOR_OBJECT")
+    return adopt_with_shared_coordinator(journal, coordinator, marker_sha256,
+                                         root_label=root_label, ack=ack)
 
 
 def parse_gh_response(raw: bytes, returncode: int, method: str) -> dict:
@@ -652,6 +671,10 @@ def main(argv: list[str] | None = None) -> int:
     ar.add_argument("--evidence-dir", type=Path, default=Path("evidence"))
     ar.add_argument("--marker-sha256", required=True)
     ar.add_argument("--ack", required=True)
+    ar.add_argument("--db", type=Path, required=True,
+                    help="Existing initialized single shared SQLite authority; no auto-create")
+    ar.add_argument("--root-label", required=True,
+                    help="Stable lab-only provenance label of this evidence root")
     a = sub.add_parser("attempt-merge", help="DRY-RUN by default; actual merge needs two explicit approvals")
     a.add_argument("--pr", type=int, required=True)
     a.add_argument("--scenario", choices=SCENARIOS, required=True)
@@ -679,9 +702,13 @@ def main(argv: list[str] | None = None) -> int:
                                             marker_sha256=args.marker_sha256, remote=args.remote)
             print(json.dumps(result, sort_keys=True))
         elif args.command == "record-orphan":
+            from f7_coordinator import SharedCoordinator
             result = adopt_single_orphan_intent(EvidenceJournal(args.evidence_dir),
-                                                 args.marker_sha256, ack=args.ack)
+                                                 args.marker_sha256, ack=args.ack,
+                                                 coordinator=SharedCoordinator(args.db),
+                                                 root_label=args.root_label)
             print(json.dumps(result, sort_keys=True))
+            return 2  # All recovery outcomes are HOLD, even after evidence append.
         elif args.command == "snapshot":
             result = snapshot(LAB_REPO, args.pr)
             rec = EvidenceJournal(args.evidence_dir).append("snapshot", "gh-api", canonical(result), {"scenario": args.scenario, "stage": args.stage, "pr": args.pr})

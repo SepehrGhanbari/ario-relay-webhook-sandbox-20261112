@@ -4,9 +4,10 @@
 This is not an App publisher, merge approval, security boundary against the
 owner, independent custody, a network service, or multi-host consensus.
 
-Existing F4 `record-orphan` remains *ungated*; this opt-in adapter cannot
-provide global exclusion unless *all writers* use this same database and no
-writer bypasses it. A separate DB copy/restore can fork the authority.
+F8: the supported r2a0 public API and CLI now REQUIRE this coordinator.
+Private Python internals can still be invoked by code running with the same
+owner privileges; this is NOT an OS/cryptographic trust boundary. All writers
+must use the SAME database. A copy/restore can fork authority.
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ import sqlite3
 import sys
 
 from r2a0 import (
-    EvidenceJournal, _merge_intent_entries, adopt_single_orphan_intent,
+    EvidenceJournal, _merge_intent_entries, _append_orphan_after_claim_internal,
     canonical, digest,
 )
 
@@ -173,8 +174,8 @@ def adopt_with_shared_coordinator(journal: EvidenceJournal, coordinator: SharedC
     """Mandatory ordering for this *adapter only*: local preflight → global claim → append.
 
     A crash at any point after grant keeps it claimed, with no expiry and no
-    automatic takeover. The old `record-orphan` CLI is NOT yet forced through
-    this adapter, so this is a proof of a bounded mechanism, not deployment.
+    automatic takeover. Supported public API/CLI now require this adapter.
+    Private internals and hostile same-owner code are NOT security-isolated.
     """
     if ack != ACK:
         raise PermissionError("EXPLICIT_RECOVERY_ACK_REQUIRED")
@@ -190,7 +191,7 @@ def adopt_with_shared_coordinator(journal: EvidenceJournal, coordinator: SharedC
     if after_claim is not None:
         after_claim()  # Fault injection in local tests only; can hard-crash.
     try:
-        local = adopt_single_orphan_intent(journal, marker, ack=ack)
+        local = _append_orphan_after_claim_internal(journal, marker, ack=ack)
     except Exception:
         # Persistent global claim is never undone or transferred automatically.
         raise

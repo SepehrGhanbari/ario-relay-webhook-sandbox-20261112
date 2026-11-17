@@ -55,7 +55,7 @@ while not go.exists() and time.monotonic()<deadline: time.sleep(.003)
 if not go.exists(): sys.exit(8)
 with patch.object(r2a0, 'gh_api', side_effect=AssertionError('NO_REMOTE_CALL_ALLOWED')):
     try:
-        result=r2a0.adopt_single_orphan_intent(r2a0.EvidenceJournal(root), str(marker), ack='RECORD_ORPHAN_ONLY_NO_MERGE_RETRY')
+        result=r2a0._append_orphan_after_claim_internal(r2a0.EvidenceJournal(root), str(marker), ack='RECORD_ORPHAN_ONLY_NO_MERGE_RETRY')
         print(json.dumps(result))
     except Exception as e:
         print(json.dumps({'status':'HOLD','error':str(e)}))
@@ -133,7 +133,7 @@ class TestF6SeparateRoots(unittest.TestCase):
         left_marker=r2a0.digest(r2a0.canonical(INTENT))
         right_marker=r2a0.digest(r2a0.canonical(different))
         for root,marker in ((self.left,left_marker),(self.right,right_marker)):
-            r2a0.adopt_single_orphan_intent(r2a0.EvidenceJournal(root),marker,ack='RECORD_ORPHAN_ONLY_NO_MERGE_RETRY')
+            r2a0._append_orphan_after_claim_internal(r2a0.EvidenceJournal(root),marker,ack='RECORD_ORPHAN_ONLY_NO_MERGE_RETRY')
         c=compare(self.left,self.right)
         self.assertEqual(c['status'],'UNKNOWN_NO_DUPLICATE_IN_TWO_OBSERVED_ROOTS')
         self.assertEqual(c['root_set_completeness'],'UNKNOWN')
@@ -141,8 +141,8 @@ class TestF6SeparateRoots(unittest.TestCase):
     def test_corrupt_or_missing_root_refuses_comparison(self):
         write_fixture(self.left,'left')
         write_fixture(self.right,'right')
-        r2a0.adopt_single_orphan_intent(r2a0.EvidenceJournal(self.left),r2a0.digest(r2a0.canonical(INTENT)),ack='RECORD_ORPHAN_ONLY_NO_MERGE_RETRY')
-        r2a0.adopt_single_orphan_intent(r2a0.EvidenceJournal(self.right),r2a0.digest(r2a0.canonical(INTENT)),ack='RECORD_ORPHAN_ONLY_NO_MERGE_RETRY')
+        r2a0._append_orphan_after_claim_internal(r2a0.EvidenceJournal(self.left),r2a0.digest(r2a0.canonical(INTENT)),ack='RECORD_ORPHAN_ONLY_NO_MERGE_RETRY')
+        r2a0._append_orphan_after_claim_internal(r2a0.EvidenceJournal(self.right),r2a0.digest(r2a0.canonical(INTENT)),ack='RECORD_ORPHAN_ONLY_NO_MERGE_RETRY')
         (self.right / 'journal.jsonl').write_bytes(b'tampered\n')
         self.assertEqual(compare(self.left,self.right)['status'],'HOLD_ROOT_INSPECTION_FAILED')
         self.assertEqual(compare(self.left,self.base / 'missing')['status'],'HOLD_ROOT_INSPECTION_FAILED')
@@ -150,7 +150,7 @@ class TestF6SeparateRoots(unittest.TestCase):
     def test_orphan_on_one_side_forces_hold_without_repairs(self):
         write_fixture(self.left,'left')
         write_fixture(self.right,'right')
-        r2a0.adopt_single_orphan_intent(r2a0.EvidenceJournal(self.left),r2a0.digest(r2a0.canonical(INTENT)),ack='RECORD_ORPHAN_ONLY_NO_MERGE_RETRY')
+        r2a0._append_orphan_after_claim_internal(r2a0.EvidenceJournal(self.left),r2a0.digest(r2a0.canonical(INTENT)),ack='RECORD_ORPHAN_ONLY_NO_MERGE_RETRY')
         before=(snapshot(self.left),snapshot(self.right))
         report=compare(self.left,self.right)
         self.assertEqual(report['status'],'HOLD_ROOT_INSPECTION_FAILED')
@@ -158,7 +158,7 @@ class TestF6SeparateRoots(unittest.TestCase):
 
     def test_cloned_backup_can_look_like_duplicate_intent(self):
         write_fixture(self.left,'one-origin')
-        r2a0.adopt_single_orphan_intent(r2a0.EvidenceJournal(self.left),r2a0.digest(r2a0.canonical(INTENT)),ack='RECORD_ORPHAN_ONLY_NO_MERGE_RETRY')
+        r2a0._append_orphan_after_claim_internal(r2a0.EvidenceJournal(self.left),r2a0.digest(r2a0.canonical(INTENT)),ack='RECORD_ORPHAN_ONLY_NO_MERGE_RETRY')
         shutil.copytree(self.left,self.right)
         report=compare(self.left,self.right)
         self.assertEqual(report['status'],'HOLD_DUPLICATE_INTENT_ACROSS_ROOTS')

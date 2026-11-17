@@ -1,0 +1,89 @@
+======================================================================
+ERROR: test_f8_ack_rejects_even_with_coordinator (test_f8_required_coordinator.TestF8MandatoryPublicEntry.test_f8_ack_rejects_even_with_coordinator)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/data/r2a0-f8-red-baseline/tests/test_f8_required_coordinator.py", line 132, in test_f8_ack_rejects_even_with_coordinator
+    r2a0.adopt_single_orphan_intent(r2a0.EvidenceJournal(self.a),self.marker,ack='BAD',
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                                    coordinator=self.coord,root_label='A')
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: adopt_single_orphan_intent() got an unexpected keyword argument 'coordinator'
+
+======================================================================
+ERROR: test_f8_missing_coordinator_db_holds_without_creating (test_f8_required_coordinator.TestF8MandatoryPublicEntry.test_f8_missing_coordinator_db_holds_without_creating)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/data/r2a0-f8-red-baseline/tests/test_f8_required_coordinator.py", line 54, in test_f8_missing_coordinator_db_holds_without_creating
+    r2a0.adopt_single_orphan_intent(r2a0.EvidenceJournal(self.a),self.marker,ack=f7.ACK,
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                                    coordinator=f7.SharedCoordinator(missing),root_label='A')
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: adopt_single_orphan_intent() got an unexpected keyword argument 'coordinator'
+
+======================================================================
+ERROR: test_f8_public_api_with_coordinator_records_only_once (test_f8_required_coordinator.TestF8MandatoryPublicEntry.test_f8_public_api_with_coordinator_records_only_once)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/data/r2a0-f8-red-baseline/tests/test_f8_required_coordinator.py", line 42, in test_f8_public_api_with_coordinator_records_only_once
+    first=r2a0.adopt_single_orphan_intent(r2a0.EvidenceJournal(self.a), self.marker,ack=f7.ACK,
+                                        coordinator=self.coord,root_label='A')
+TypeError: adopt_single_orphan_intent() got an unexpected keyword argument 'coordinator'
+
+======================================================================
+ERROR: test_f8_public_cli_and_f7_cli_share_single_authority (test_f8_required_coordinator.TestF8MandatoryPublicEntry.test_f8_public_cli_and_f7_cli_share_single_authority)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/data/r2a0-f8-red-baseline/tests/test_f8_required_coordinator.py", line 74, in test_f8_public_cli_and_f7_cli_share_single_authority
+    self.assertEqual(json.loads(c1.stdout)['reason'],'LOCAL_RECOVERY_RECORDED_GLOBAL_CLAIM_HELD_NO_MERGE_RETRY')
+                     ~~~~~~~~~~^^^^^^^^^^^
+  File "/usr/lib/python3.13/json/__init__.py", line 346, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/usr/lib/python3.13/json/decoder.py", line 345, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/json/decoder.py", line 363, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+
+======================================================================
+FAIL: test_f8_no_fake_public_module_authority_via_legacy_cli (test_f8_required_coordinator.TestF8MandatoryPublicEntry.test_f8_no_fake_public_module_authority_via_legacy_cli)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/data/r2a0-f8-red-baseline/tests/test_f8_required_coordinator.py", line 140, in test_f8_no_fake_public_module_authority_via_legacy_cli
+    with self.assertRaises(PermissionError):
+         ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+AssertionError: PermissionError not raised
+
+======================================================================
+FAIL: test_f8_old_cli_without_db_refuses_without_writing (test_f8_required_coordinator.TestF8MandatoryPublicEntry.test_f8_old_cli_without_db_refuses_without_writing)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/data/r2a0-f8-red-baseline/tests/test_f8_required_coordinator.py", line 64, in test_f8_old_cli_without_db_refuses_without_writing
+    self.assertNotEqual(proc.returncode,0)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+AssertionError: 0 == 0
+
+======================================================================
+FAIL: test_f8_public_api_without_coordinator_denied_no_write (test_f8_required_coordinator.TestF8MandatoryPublicEntry.test_f8_public_api_without_coordinator_denied_no_write)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/data/r2a0-f8-red-baseline/tests/test_f8_required_coordinator.py", line 34, in test_f8_public_api_without_coordinator_denied_no_write
+    with self.assertRaisesRegex(PermissionError,'COORDINATOR_REQUIRED'):
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: PermissionError not raised
+
+======================================================================
+FAIL: test_f8_two_public_cli_processes_race_one_authority (test_f8_required_coordinator.TestF8MandatoryPublicEntry.test_f8_two_public_cli_processes_race_one_authority)
+Independent CLI processes, not direct F7 adapter calls.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/data/r2a0-f8-red-baseline/tests/test_f8_required_coordinator.py", line 115, in test_f8_two_public_cli_processes_race_one_authority
+    self.assertEqual(worker.returncode,0,(out,err))
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 2 != 0 : ('', 'usage: -c [-h]\n          {snapshot,verify,inspect-recovery,record-orphan,attempt-merge,listen,record} ...\n-c: error: unrecognized arguments: --db /tmp/tmpnhnmlbfh/authority/claims.sqlite --root-label A\n')
+
+----------------------------------------------------------------------
+Ran 8 tests in 3.194s
+
+FAILED (failures=4, errors=4)

@@ -112,4 +112,14 @@ An empty journal now prints `NO_JOURNAL` or `EMPTY_JOURNAL`, not `PASS`. A compl
 
 ## F4: read-only inspection and deliberately manual orphan adoption
 
-On HOLD, **do not erase the marker or rerun `attempt-merge`**. Capture an offline copy and checksum of the directory; inspect via `inspect-recovery --evidence-dir DIR`. An orphan marker's original SHA-256 is the identifier. If and only if all original evidence other than one valid marker is intact, `record-orphan --marker-sha256 H --ack RECORD_ORPHAN_ONLY_NO_MERGE_RETRY` may append the recovered `merge-intent` event while preserving the marker; outcome remains UNKNOWN. Optional `inspect-recovery --marker-sha256 H --remote` uses a single GitHub GET and never permits a retry. Evidence directories are single-use for native merge probes. All claim/object/index corruption remains HOLD for manual forensic review; no repair or retry is authorized. See `F4_SAFE_HOLD_RECOVERY_REVIEW.md`.
+On HOLD, **do not erase the marker or rerun `attempt-merge`**. Capture an offline copy and checksum of the directory; inspect via `inspect-recovery --evidence-dir DIR`. An orphan marker's original SHA-256 is the identifier. If and only if all original evidence other than one valid marker is intact, `record-orphan --evidence-dir DIR --marker-sha256 H --ack RECORD_ORPHAN_ONLY_NO_MERGE_RETRY --db SHARED_PREINITIALIZED_COORDINATOR.db --root-label UNIQUE_ROOT_LABEL` may append the recovered `merge-intent` event while preserving the marker; outcome remains UNKNOWN. Optional `inspect-recovery --marker-sha256 H --remote` uses a single GitHub GET and never permits a retry. Evidence directories are single-use for native merge probes. All claim/object/index corruption remains HOLD for manual forensic review; no repair or retry is authorized. See `F4_SAFE_HOLD_RECOVERY_REVIEW.md`.
+
+
+## F8: mandatory coordinator for supported recovery routes (2026-11-17)
+
+- For test/lab-only initialization (never in production): `python f7_coordinator.py init --db /lab/shared/claims.db`.
+- Public supported recovery: `python r2a0.py record-orphan --evidence-dir ROOT --marker-sha256 HASH --ack RECORD_ORPHAN_ONLY_NO_MERGE_RETRY --db /lab/shared/claims.db --root-label ROOT_A`.
+- The alternate F7 adapter `python f7_coordinator.py adopt ...` uses the same file and same claim rules.
+- No shared DB, no recovery; a finished append is still `HOLD` (CLI exit 2). Do not retry a native merge.
+- Never copy or fork the coordinator DB and claim mutual exclusion; no external custody is established. The Python internal helper is not a security boundary against arbitrary same-owner code execution.
+- For exact negative tests and limitations see `F8_MANDATORY_COORDINATOR_REVIEW.md` and Trae's `F8_TRAE_INDEPENDENT_REVIEW_TASK.md`.

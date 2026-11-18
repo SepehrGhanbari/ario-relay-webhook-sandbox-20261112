@@ -1,0 +1,49 @@
+--- a/src/f7_coordinator.py
++++ b/src/f7_coordinator.py
+@@ -141,24 +141,36 @@
+             raise ValueError("COORDINATOR_UNAVAILABLE_OR_CORRUPT") from exc
+ 
+     def record_local_observation(self, intent: dict, marker: str, root_label: str) -> None:
+-        """Append a second fact after local evidence append; no state overwrite."""
++        """Append a locally verified *observation*, NOT an independent witness receipt.
++
++        F11: a claim alone cannot prove a persisted merge-intent journal record.
++        Keep all prior phases as historical evidence; never repair or retry.
++        """
++        raw = canonical(intent)
++        EvidenceJournal._validated_merge_intent(raw)
++        if digest(raw) != marker:
++            raise ValueError("GLOBAL_OBSERVATION_INTENT_MISMATCH")
+         try:
+             with closing(self._connect()) as db:
+                 db.execute("BEGIN IMMEDIATE")
+-                stored = db.execute("SELECT marker, root_label FROM claims WHERE repo=? AND pr=?", (
+-                    intent['repo'], intent['pr'])).fetchone()
+-                if stored != (marker, root_label):
++                stored = db.execute("SELECT marker,root_label FROM claims WHERE repo=? AND pr=?", (intent["repo"],intent["pr"])).fetchone()
++                if stored != (marker,root_label):
+                     raise ValueError("GLOBAL_CLAIM_OWNER_OR_MARKER_MISMATCH")
+-                phases = [row[0] for row in db.execute("SELECT phase FROM events WHERE repo=? AND pr=? AND marker=? AND root_label=?", (
+-                    intent['repo'], intent['pr'], marker, root_label))]
+-                if phases.count("CLAIMED") != 1 or "LOCAL_EVIDENCE_RECORDED" in phases:
++                phases = [x[0] for x in db.execute("SELECT phase FROM events WHERE repo=? AND pr=? AND marker=? AND root_label=?", (intent["repo"],intent["pr"],marker,root_label))]
++                if phases.count("CLAIMED") != 1 or phases.count("AUTHORITY_CONSUMED") != 1 or "LOCAL_EVIDENCE_RECORDED" in phases:
+                     raise ValueError("GLOBAL_CLAIM_PHASE_INCONSISTENT")
+-                db.execute("INSERT INTO events(repo,pr,marker,phase,root_label) VALUES(?,?,?,?,?)", (
+-                    intent['repo'], intent['pr'], marker, "LOCAL_EVIDENCE_RECORDED", root_label))
++                consumed = db.execute("SELECT marker,root_label,evidence_root FROM consumptions WHERE repo=? AND pr=?", (intent["repo"],intent["pr"])).fetchone()
++                if consumed is None or consumed[:2] != (marker,root_label) or not consumed[2]:
++                    raise ValueError("GLOBAL_OBSERVATION_WITHOUT_MATCHING_CONSUMPTION")
++                root = Path(consumed[2])
++                records = EvidenceJournal(root).read()
++                matches = [r for r in records if r["event"] == "merge-intent" and r["source"] == "local" and r["payload_sha256"] == marker and (root/r["payload_path"]).read_bytes() == raw]
++                if len(matches) != 1:
++                    raise ValueError("GLOBAL_OBSERVATION_JOURNAL_NOT_VERIFIED")
++                db.execute("INSERT INTO events(repo,pr,marker,phase,root_label) VALUES(?,?,?,?,?)", (intent["repo"],intent["pr"],marker,"LOCAL_EVIDENCE_RECORDED",root_label))
+                 db.commit()
+         except sqlite3.Error as exc:
+             raise ValueError("COORDINATOR_UNAVAILABLE_OR_CORRUPT") from exc
+-
+     def inspect(self, repo: str, pr: int) -> dict:
+         # Read-only by contract at the API level (SQLite may create transient lock files).
+         try:

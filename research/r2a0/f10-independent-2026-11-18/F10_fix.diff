@@ -1,0 +1,197 @@
+diff --git a/research/r2a0/v02/f7_coordinator.py b/research/r2a0/v02/f7_coordinator.py
+index 4079185..611847b 100644
+--- a/research/r2a0/v02/f7_coordinator.py
++++ b/research/r2a0/v02/f7_coordinator.py
+@@ -23,11 +23,11 @@ import sys
+ 
+ from r2a0 import (
+     EvidenceJournal, _merge_intent_entries, _append_orphan_after_claim_internal,
+-    canonical, digest,
++    canonical, digest, utc_now,
+ )
+ 
+ ACK = "RECORD_ORPHAN_ONLY_NO_MERGE_RETRY"
+-DB_VERSION = 7
++DB_VERSION = 8
+ SHA256 = re.compile(r"[a-f0-9]{64}\Z")
+ 
+ 
+@@ -78,6 +78,7 @@ class SharedCoordinator:
+                 db.execute("BEGIN IMMEDIATE")
+                 db.execute("CREATE TABLE claims (repo TEXT NOT NULL, pr INTEGER NOT NULL, marker TEXT NOT NULL, root_label TEXT NOT NULL, PRIMARY KEY (repo,pr))")
+                 db.execute("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, pr INTEGER NOT NULL, marker TEXT NOT NULL, phase TEXT NOT NULL, root_label TEXT NOT NULL)")
++                db.execute("CREATE TABLE consumptions (repo TEXT NOT NULL, pr INTEGER NOT NULL, marker TEXT NOT NULL, root_label TEXT NOT NULL, evidence_root TEXT NOT NULL, consumed_utc TEXT NOT NULL, PRIMARY KEY (repo,pr))")
+                 db.execute(f"PRAGMA user_version={DB_VERSION}")
+                 db.commit()
+         except Exception:
+@@ -98,7 +99,7 @@ class SharedCoordinator:
+             if db.execute("PRAGMA user_version").fetchone()[0] != DB_VERSION:
+                 raise ValueError("COORDINATOR_SCHEMA_VERSION_MISMATCH")
+             objects = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+-            if not {"claims", "events"}.issubset(objects):
++            if not {"claims", "events", "consumptions"}.issubset(objects):
+                 raise ValueError("COORDINATOR_SCHEMA_INCOMPLETE")
+             return db
+         except Exception:
+@@ -191,11 +192,15 @@ class MergeIntentAuthority:
+         self.db_path = db_path
+ 
+ 
++def _read_claim_row(db: sqlite3.Connection, repo: str, pr: int):
++    row = db.execute("SELECT marker, root_label FROM claims WHERE repo=? AND pr=?", (repo, pr)).fetchone()
++    phases = [r[0] for r in db.execute("SELECT phase FROM events WHERE repo=? AND pr=?", (repo, pr))]
++    return row, phases
++
++
+ def _read_claim(coordinator: "SharedCoordinator", repo: str, pr: int):
+     with closing(coordinator._connect(readonly=True)) as db:
+-        row = db.execute("SELECT marker, root_label FROM claims WHERE repo=? AND pr=?", (repo, pr)).fetchone()
+-        phases = [r[0] for r in db.execute("SELECT phase FROM events WHERE repo=? AND pr=?", (repo, pr))]
+-    return row, phases
++        return _read_claim_row(db, repo, pr)
+ 
+ 
+ def mint_intent_authority(coordinator: "SharedCoordinator", intent: dict, marker: str,
+@@ -229,13 +234,75 @@ def verify_intent_authority(authority: MergeIntentAuthority, intent_bytes: bytes
+     if (intent["repo"], intent["pr"]) != (authority.repo, authority.pr):
+         raise PermissionError("AUTHORITY_INTENT_MISMATCH")
+     row, phases = _read_claim(SharedCoordinator(Path(authority.db_path)), authority.repo, authority.pr)
+-    if tuple(row) != (authority.marker, authority.root_label):
++    if row is None or tuple(row) != (authority.marker, authority.root_label):
+         raise PermissionError("AUTHORITY_NOT_DURABLE")
+     if phases.count("CLAIMED") != 1:
+         raise PermissionError("AUTHORITY_PHASE_INCONSISTENT")
+     return intent
+ 
+ 
++def consume_intent_authority(authority: MergeIntentAuthority, intent_bytes: bytes,
++                             evidence_root: str) -> dict:
++    """Durably and atomically consume one authority for exactly one evidence root.
++
++    F10 fix for the VERIFIED double-use: ``verify_intent_authority`` is a
++    read-only re-check, so a single authority could be accepted by two roots
++    before any LOCAL_EVIDENCE_RECORDED event. This function performs the check
++    *and* a one-time reservation in a single ``BEGIN IMMEDIATE`` transaction,
++    committed BEFORE any journal write. The reservation is bound to the exact
++    intent bytes (marker) and the exact evidence root.
++
++    Semantics:
++      * Second/duplicate consumption of the same (repo, pr) is refused with
++        ``PermissionError("AUTHORITY_ALREADY_CONSUMED")`` even if a fresh
++        authority object is minted for the same claim.
++      * A crash AFTER this commit but BEFORE the journal write leaves the intent
++        CONSUMED with no journal row: HOLD, never automatic takeover/retry.
++
++    Preserved limits (NOT fixed here, disclosed): a copied/restored/forked DB
++    resets consumption; a same-owner interpreter can still call
++    ``EvidenceJournal._append_merge_intent_raw``; no cryptographic token and no
++    independent custody is provided. This is supported-contract enforcement on
++    ONE shared SQLite file only.
++    """
++    if not isinstance(authority, MergeIntentAuthority):
++        raise PermissionError("INVALID_MERGE_INTENT_AUTHORITY")
++    intent = EvidenceJournal._validated_merge_intent(intent_bytes)
++    if digest(intent_bytes) != authority.marker:
++        raise PermissionError("AUTHORITY_INTENT_MISMATCH")
++    if (intent["repo"], intent["pr"]) != (authority.repo, authority.pr):
++        raise PermissionError("AUTHORITY_INTENT_MISMATCH")
++    if not isinstance(evidence_root, str) or not evidence_root:
++        raise ValueError("INVALID_EVIDENCE_ROOT")
++    coord = SharedCoordinator(Path(authority.db_path))
++    try:
++        with closing(coord._connect()) as db:
++            db.execute("BEGIN IMMEDIATE")
++            row, _ = _read_claim_row(db, authority.repo, authority.pr)
++            if row is None or tuple(row) != (authority.marker, authority.root_label):
++                db.rollback()
++                raise PermissionError("AUTHORITY_NOT_DURABLE")
++            if db.execute("SELECT 1 FROM consumptions WHERE repo=? AND pr=?", (
++                    authority.repo, authority.pr)).fetchone() is not None:
++                # Audit the refused reuse, then refuse: one intent, one root.
++                db.execute("INSERT INTO events(repo,pr,marker,phase,root_label) VALUES(?,?,?,?,?)", (
++                    authority.repo, authority.pr, authority.marker,
++                    "REFUSED_AUTHORITY_REUSE", authority.root_label))
++                db.commit()
++                raise PermissionError("AUTHORITY_ALREADY_CONSUMED")
++            db.execute("INSERT INTO consumptions(repo,pr,marker,root_label,evidence_root,consumed_utc) VALUES(?,?,?,?,?,?)", (
++                authority.repo, authority.pr, authority.marker, authority.root_label,
++                evidence_root, utc_now()))
++            db.execute("INSERT INTO events(repo,pr,marker,phase,root_label) VALUES(?,?,?,?,?)", (
++                authority.repo, authority.pr, authority.marker,
++                "AUTHORITY_CONSUMED", authority.root_label))
++            db.commit()
++            return _hold("AUTHORITY_CONSUMED_LOCAL_WRITE_PENDING", consumed=True,
++                         evidence_root=evidence_root)
++    except sqlite3.Error as exc:
++        raise ValueError("COORDINATOR_UNAVAILABLE_OR_CORRUPT") from exc
++
++
+ def adopt_with_shared_coordinator(journal: EvidenceJournal, coordinator: SharedCoordinator,
+                                   marker: str, *, root_label: str, ack: str,
+                                   after_claim=None) -> dict:
+diff --git a/research/r2a0/v02/r2a0.py b/research/r2a0/v02/r2a0.py
+index 5f6972f..77df880 100644
+--- a/research/r2a0/v02/r2a0.py
++++ b/research/r2a0/v02/r2a0.py
+@@ -260,10 +260,14 @@ class EvidenceJournal:
+         ``authority`` must be a checkable coordination record
+         (``f7_coordinator.MergeIntentAuthority``) bound to exactly these bytes and
+         re-derived from the single shared authority; ledger validity alone is not
+-        authorization. Hash-chain integrity and source validation are unchanged.
++        authorization. F10: the authority is additionally **atomically consumed**
++        (one-time use) and bound to this evidence root BEFORE any write, so a
++        single authority can never be accepted by two roots. Hash-chain integrity
++        and source validation are unchanged.
+         """
+-        from f7_coordinator import verify_intent_authority
+-        verify_intent_authority(authority, data)
++        from f7_coordinator import verify_intent_authority, consume_intent_authority
++        verify_intent_authority(authority, data)                 # fail-fast, read-only pre-check
++        consume_intent_authority(authority, data, str(self.root))  # durable atomic one-time reservation
+         return self._append_merge_intent_raw(data, meta)
+ 
+     def _append_merge_intent_raw(self, data: bytes, meta: dict | None = None) -> dict:
+diff --git a/research/r2a0/v02/tests/test_f7_coordinator.py b/research/r2a0/v02/tests/test_f7_coordinator.py
+index 2f26f5d..9487b7a 100644
+--- a/research/r2a0/v02/tests/test_f7_coordinator.py
++++ b/research/r2a0/v02/tests/test_f7_coordinator.py
+@@ -85,7 +85,7 @@ class TestSharedCoordinator(unittest.TestCase):
+         self.assertEqual(len(r2a0.EvidenceJournal(self.one).read()),2)
+         self.assertEqual(r2a0.inspect_merge_recovery(r2a0.EvidenceJournal(self.two))['journal_integrity'],'HOLD_ORPHAN_INTENT')
+         self.assertEqual(self.coord.inspect(INTENT['repo'],INTENT['pr'])['events'],
+-                         ['CLAIMED','LOCAL_EVIDENCE_RECORDED','REFUSED_DUPLICATE'])
++                         ['CLAIMED','AUTHORITY_CONSUMED','LOCAL_EVIDENCE_RECORDED','REFUSED_DUPLICATE'])
+         self.assertEqual(compare(self.one,self.two)['status'],'HOLD_ROOT_INSPECTION_FAILED')
+ 
+     def test_two_separate_os_processes_race_for_one_db(self):
+@@ -236,7 +236,7 @@ os._exit(78)'''
+             with self.assertRaisesRegex(RuntimeError,'injected'):
+                 f7.adopt_with_shared_coordinator(r2a0.EvidenceJournal(self.one),self.coord,marker,root_label='A',ack=f7.ACK)
+         self.assertEqual(len(r2a0.EvidenceJournal(self.one).read()),2)
+-        self.assertEqual(self.coord.inspect(INTENT['repo'],37)['events'],['CLAIMED'])
++        self.assertEqual(self.coord.inspect(INTENT['repo'],37)['events'],['CLAIMED','AUTHORITY_CONSUMED'])
+         self.assertEqual(self.coord.claim(INTENT,marker,'A')['reason'],'GLOBAL_INTENT_ALREADY_CLAIMED')
+ 
+     def test_one_distinct_pr_can_use_one_shared_coordinator(self):
+@@ -247,7 +247,7 @@ os._exit(78)'''
+         marker2=fixture(self.two,new,origin='other-pr')
+         second=f7.adopt_with_shared_coordinator(r2a0.EvidenceJournal(self.two),self.coord,marker2,root_label='B',ack=f7.ACK)
+         self.assertEqual(second['reason'],'LOCAL_RECOVERY_RECORDED_GLOBAL_CLAIM_HELD_NO_MERGE_RETRY')
+-        self.assertEqual(self.coord.inspect(INTENT['repo'],38)['events'],['CLAIMED','LOCAL_EVIDENCE_RECORDED'])
++        self.assertEqual(self.coord.inspect(INTENT['repo'],38)['events'],['CLAIMED','AUTHORITY_CONSUMED','LOCAL_EVIDENCE_RECORDED'])
+ 
+     def test_legacy_public_recording_is_now_denied_and_cannot_bypass_coordinator(self):
+         """F8 RED/GREEN: old public API cannot append without the common DB."""
+diff --git a/research/r2a0/v02/tests/test_f9_coordinated_intent_paths.py b/research/r2a0/v02/tests/test_f9_coordinated_intent_paths.py
+index d3c3815..0aab41c 100644
+--- a/research/r2a0/v02/tests/test_f9_coordinated_intent_paths.py
++++ b/research/r2a0/v02/tests/test_f9_coordinated_intent_paths.py
+@@ -96,7 +96,7 @@ class TestF9Priority0AAttemptMerge(unittest.TestCase):
+         self.assertEqual(self._intents(self.b), [], "second root must not record a local intent")
+         self.assertEqual(len(spy.calls), 1, "network action only for the winning claim")
+         self.assertEqual(coord.inspect(INTENT["repo"], INTENT["pr"])["events"],
+-                         ["CLAIMED", "LOCAL_EVIDENCE_RECORDED", "REFUSED_DUPLICATE"])
++                         ["CLAIMED", "AUTHORITY_CONSUMED", "LOCAL_EVIDENCE_RECORDED", "REFUSED_DUPLICATE"])
+ 
+     def test_0a_dry_run_creates_no_intent_and_no_coordinated_claim(self):
+         spy = _NetworkSpy(result={"status": "DRY_RUN", "reason": "NO_WRITE_PERFORMED"})

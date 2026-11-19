@@ -1,0 +1,66 @@
+{
+  "version": "f16.experimental.v1",
+  "exact_public_nostr_events": [
+    {
+      "pubkey": "a83270bc0068711429fd7fde8c4d93157eb700495b4017a23a49eafbe95d5659",
+      "created_at": 1795125284,
+      "kind": 1,
+      "tags": [
+        [
+          "t",
+          "ario-f16-20261120-research"
+        ],
+        [
+          "d",
+          "f16-synthetic-latest-floor"
+        ]
+      ],
+      "content": "{\"commitment_sha256\":\"1287f223186e3f71ed5230261d375e8c8070b0eca8384fc30b8de73050b1c5c3\",\"prev_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"production\":\"NO_GO\",\"seq\":1,\"source\":\"REKOR_V2_F15_SYNTHETIC_ONLY\",\"study\":\"ARIO_F16_PUBLIC_DISCOVERY_ONLY\"}",
+      "id": "4ba8f0d8fb895c4158668240148562bd190aa585780e5d8ba7635dedbb9a5427",
+      "sig": "46a330286d7d0214b7e55536ff717b12f74fb42495a284e7752d16490cba0597158676182e0ed96add5cdb72c99728d74ce4b4841f29609b37e23ef15a7e2d4a"
+    },
+    {
+      "pubkey": "a83270bc0068711429fd7fde8c4d93157eb700495b4017a23a49eafbe95d5659",
+      "created_at": 1795125285,
+      "kind": 1,
+      "tags": [
+        [
+          "t",
+          "ario-f16-20261120-research"
+        ],
+        [
+          "d",
+          "f16-synthetic-latest-floor"
+        ]
+      ],
+      "content": "{\"commitment_sha256\":\"cf7ad5df590b7b905faefe4bc0ae1e25a20c556887d56179592ddcaa7bfe9a63\",\"prev_sha256\":\"1287f223186e3f71ed5230261d375e8c8070b0eca8384fc30b8de73050b1c5c3\",\"production\":\"NO_GO\",\"seq\":2,\"source\":\"REKOR_V2_F15_SYNTHETIC_ONLY\",\"study\":\"ARIO_F16_PUBLIC_DISCOVERY_ONLY\"}",
+      "id": "3296d8309bb478b56778b7651da0cec1e84b05db9aaf474f55e8a6c80d239a4c",
+      "sig": "ed72af45dd006e5ef1fce158f8ec014cb347660b9196b067c7307273da95ec28bf152f6ce8abe3516218951e3bcc8ec5a9f33b1055dbc4b42bc2ba4eb1f573c6"
+    }
+  ],
+  "relay_ack_and_retrieval": [
+    {
+      "host": "wss://nos.lol",
+      "A_ok": true,
+      "B_ok": true,
+      "readback_A": true,
+      "readback_B": true
+    },
+    {
+      "host": "wss://relay.primal.net",
+      "A_ok": true,
+      "B_ok": true,
+      "readback_A": true,
+      "readback_B": true
+    },
+    {
+      "host": "wss://relay.nostr.net",
+      "A_ok": true,
+      "B_ok": true,
+      "readback_A": true,
+      "readback_B": true
+    }
+  ],
+  "note": "Observed from live submissions and two separate reads including fresh reader with pinned author key; relays did not sign a durable retention receipt",
+  "custody": "NOT_ESTABLISHED"
+}

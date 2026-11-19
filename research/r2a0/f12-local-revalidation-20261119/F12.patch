@@ -1,0 +1,152 @@
+diff --git a/f7_coordinator.py b/f7_coordinator.py
+index 08b156a..d1b76de 100644
+--- a/f7_coordinator.py
++++ b/f7_coordinator.py
+@@ -27,7 +27,7 @@ from r2a0 import (
+ )
+ 
+ ACK = "RECORD_ORPHAN_ONLY_NO_MERGE_RETRY"
+-DB_VERSION = 8
++DB_VERSION = 9
+ SHA256 = re.compile(r"[a-f0-9]{64}\Z")
+ 
+ 
+@@ -79,6 +79,10 @@ class SharedCoordinator:
+                 db.execute("CREATE TABLE claims (repo TEXT NOT NULL, pr INTEGER NOT NULL, marker TEXT NOT NULL, root_label TEXT NOT NULL, PRIMARY KEY (repo,pr))")
+                 db.execute("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, pr INTEGER NOT NULL, marker TEXT NOT NULL, phase TEXT NOT NULL, root_label TEXT NOT NULL)")
+                 db.execute("CREATE TABLE consumptions (repo TEXT NOT NULL, pr INTEGER NOT NULL, marker TEXT NOT NULL, root_label TEXT NOT NULL, evidence_root TEXT NOT NULL, consumed_utc TEXT NOT NULL, PRIMARY KEY (repo,pr))")
++                # F12: dual local commitments make isolated column changes visible.
++                # Both remain same-owner mutable, NOT independent custody.
++                db.execute("CREATE TABLE root_bindings (repo TEXT NOT NULL, pr INTEGER NOT NULL, marker TEXT NOT NULL, evidence_root_sha256 TEXT NOT NULL, PRIMARY KEY (repo,pr))")
++                db.execute("CREATE TABLE observation_snapshots (repo TEXT NOT NULL, pr INTEGER NOT NULL, marker TEXT NOT NULL, root_label TEXT NOT NULL, evidence_root_sha256 TEXT NOT NULL, journal_sha256 TEXT NOT NULL, record_hash TEXT NOT NULL, PRIMARY KEY (repo,pr))")
+                 db.execute(f"PRAGMA user_version={DB_VERSION}")
+                 db.commit()
+         except Exception:
+@@ -99,7 +103,7 @@ class SharedCoordinator:
+             if db.execute("PRAGMA user_version").fetchone()[0] != DB_VERSION:
+                 raise ValueError("COORDINATOR_SCHEMA_VERSION_MISMATCH")
+             objects = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+-            if not {"claims", "events", "consumptions"}.issubset(objects):
++            if not {"claims", "events", "consumptions", "root_bindings", "observation_snapshots"}.issubset(objects):
+                 raise ValueError("COORDINATOR_SCHEMA_INCOMPLETE")
+             return db
+         except Exception:
+@@ -140,11 +144,40 @@ class SharedCoordinator:
+         except sqlite3.Error as exc:
+             raise ValueError("COORDINATOR_UNAVAILABLE_OR_CORRUPT") from exc
+ 
++    @staticmethod
++    def _current_local_snapshot(root: Path, marker: str, *, expected_intent: bytes | None = None) -> tuple[str, str]:
++        """Best-effort exact local readback; cannot lock external files atomically.
++
++        Check the raw journal bytes before and after a complete journal.read()
++        and a second time just before returning, rejecting a change between
++        samples. This is NOT proof that files remain unmodified after return.
++        """
++        journal = EvidenceJournal(root)
++        journal._safe_root()
++        if not journal.index.is_file() or journal.index.is_symlink():
++            raise ValueError("LOCAL_OBSERVATION_INDEX_NOT_PRESENT")
++        first = journal.index.read_bytes()
++        records = journal.read()  # checks hash-chain, objects, claims, and marker
++        second = journal.index.read_bytes()
++        if first != second:
++            raise ValueError("LOCAL_OBSERVATION_INDEX_CHANGED_DURING_READ")
++        matches = [r for r in records if r["event"] == "merge-intent" and r["source"] == "local"
++                   and r["payload_sha256"] == marker]
++        if len(matches) != 1:
++            raise ValueError("GLOBAL_OBSERVATION_JOURNAL_NOT_VERIFIED")
++        item = matches[0]
++        raw = (root/item["payload_path"]).read_bytes()
++        if digest(raw) != marker or (expected_intent is not None and raw != expected_intent):
++            raise ValueError("GLOBAL_OBSERVATION_JOURNAL_NOT_VERIFIED")
++        if journal.index.read_bytes() != first:
++            raise ValueError("LOCAL_OBSERVATION_INDEX_CHANGED_DURING_READ")
++        return digest(first), item["record_hash"]
++
+     def record_local_observation(self, intent: dict, marker: str, root_label: str) -> None:
+-        """Append a locally verified *observation*, NOT an independent witness receipt.
++        """Pin one currently verified local readback; still NOT independent receipt.
+ 
+-        F11: a claim alone cannot prove a persisted merge-intent journal record.
+-        Keep all prior phases as historical evidence; never repair or retry.
++        F12 creates a versioned snapshot. Historical audit phases remain immutable;
++        there is no transaction spanning a filesystem journal and this SQLite DB.
+         """
+         raw = canonical(intent)
+         EvidenceJournal._validated_merge_intent(raw)
+@@ -162,23 +195,57 @@ class SharedCoordinator:
+                 consumed = db.execute("SELECT marker,root_label,evidence_root FROM consumptions WHERE repo=? AND pr=?", (intent["repo"],intent["pr"])).fetchone()
+                 if consumed is None or consumed[:2] != (marker,root_label) or not consumed[2]:
+                     raise ValueError("GLOBAL_OBSERVATION_WITHOUT_MATCHING_CONSUMPTION")
++                binding = db.execute("SELECT marker,evidence_root_sha256 FROM root_bindings WHERE repo=? AND pr=?", (intent["repo"],intent["pr"])).fetchone()
++                root_sha = digest(consumed[2].encode("utf-8"))
++                if binding != (marker,root_sha):
++                    raise ValueError("ROOT_BINDING_MISMATCH")
+                 root = Path(consumed[2])
+-                records = EvidenceJournal(root).read()
+-                matches = [r for r in records if r["event"] == "merge-intent" and r["source"] == "local" and r["payload_sha256"] == marker and (root/r["payload_path"]).read_bytes() == raw]
+-                if len(matches) != 1:
+-                    raise ValueError("GLOBAL_OBSERVATION_JOURNAL_NOT_VERIFIED")
++                journal_hash,record_hash = self._current_local_snapshot(root, marker, expected_intent=raw)
++                # Second bytewise check before commit; still no cross-FS atomicity.
++                if (not (root / 'journal.jsonl').is_file() or
++                    digest((root/'journal.jsonl').read_bytes()) != journal_hash):
++                    raise ValueError("LOCAL_OBSERVATION_INDEX_CHANGED_BEFORE_COMMIT")
++                db.execute("INSERT INTO observation_snapshots(repo,pr,marker,root_label,evidence_root_sha256,journal_sha256,record_hash) VALUES(?,?,?,?,?,?,?)",
++                           (intent["repo"],intent["pr"],marker,root_label,root_sha,journal_hash,record_hash))
+                 db.execute("INSERT INTO events(repo,pr,marker,phase,root_label) VALUES(?,?,?,?,?)", (intent["repo"],intent["pr"],marker,"LOCAL_EVIDENCE_RECORDED",root_label))
+                 db.commit()
+         except sqlite3.Error as exc:
+             raise ValueError("COORDINATOR_UNAVAILABLE_OR_CORRUPT") from exc
++
+     def inspect(self, repo: str, pr: int) -> dict:
+-        # Read-only by contract at the API level (SQLite may create transient lock files).
++        """Raw events are history, NEVER automatically evidence receipts.
++
++        observation_status is checked against local files NOW. On deletion,
++        corruption or drift, return UNKNOWN rather than perpetuating a stale PASS.
++        A same-owner adversary or concurrent mutation can still forge this state.
++        """
+         try:
+-            with closing(self._connect()) as db:
++            with closing(self._connect(readonly=True)) as db:
+                 row = db.execute("SELECT marker, root_label FROM claims WHERE repo=? AND pr=?", (repo, pr)).fetchone()
+-                events = db.execute("SELECT phase FROM events WHERE repo=? AND pr=? ORDER BY id", (repo, pr)).fetchall()
++                events = [x[0] for x in db.execute("SELECT phase FROM events WHERE repo=? AND pr=? ORDER BY id", (repo, pr))]
++                status = "NOT_RECORDED"
++                reason = None
++                snap = db.execute("SELECT marker,root_label,evidence_root_sha256,journal_sha256,record_hash FROM observation_snapshots WHERE repo=? AND pr=?", (repo,pr)).fetchone()
++                if "LOCAL_EVIDENCE_RECORDED" in events:
++                    status = "UNKNOWN_LOCAL_EVIDENCE_NOT_REVALIDATED"
++                    if snap is not None:
++                        try:
++                            c = db.execute("SELECT marker,root_label,evidence_root FROM consumptions WHERE repo=? AND pr=?", (repo,pr)).fetchone()
++                            b = db.execute("SELECT marker,evidence_root_sha256 FROM root_bindings WHERE repo=? AND pr=?", (repo,pr)).fetchone()
++                            if (row is None or c is None or c[:2] != row or snap[:2] != row or not c[2]
++                                or snap[2] != digest(c[2].encode('utf-8')) or b != (row[0],snap[2])):
++                                raise ValueError("OBSERVATION_ROOT_OR_CLAIM_DRIFT")
++                            journal_sha,record_hash = self._current_local_snapshot(Path(c[2]), row[0])
++                            if (journal_sha,record_hash) != snap[3:]:
++                                raise ValueError("OBSERVATION_JOURNAL_SNAPSHOT_DRIFT")
++                            status = "CURRENT_LOCAL_READBACK_MATCH_NOT_INDEPENDENT"
++                        except (ValueError,OSError) as exc:
++                            reason = type(exc).__name__+": "+str(exc)
+                 return _hold("GLOBAL_STATE_OBSERVED_NOT_ADMISSION", claim_exists=row is not None,
+-                             marker=row[0] if row else None, events=[x[0] for x in events])
++                             marker=row[0] if row else None,
++                             events=events, events_are_historical_not_proof=True,
++                             observation_status=status, observation_reason=reason,
++                             local_files_may_change_after_read=True)
+         except sqlite3.Error as exc:
+             raise ValueError("COORDINATOR_UNAVAILABLE_OR_CORRUPT") from exc
+ 
+@@ -305,6 +372,8 @@ def consume_intent_authority(authority: MergeIntentAuthority, intent_bytes: byte
+             db.execute("INSERT INTO consumptions(repo,pr,marker,root_label,evidence_root,consumed_utc) VALUES(?,?,?,?,?,?)", (
+                 authority.repo, authority.pr, authority.marker, authority.root_label,
+                 evidence_root, utc_now()))
++            db.execute("INSERT INTO root_bindings(repo,pr,marker,evidence_root_sha256) VALUES(?,?,?,?)", (
++                authority.repo, authority.pr, authority.marker, digest(evidence_root.encode("utf-8"))))
+             db.execute("INSERT INTO events(repo,pr,marker,phase,root_label) VALUES(?,?,?,?,?)", (
+                 authority.repo, authority.pr, authority.marker,
+                 "AUTHORITY_CONSUMED", authority.root_label))

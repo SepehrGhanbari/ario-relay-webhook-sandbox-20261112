@@ -1,0 +1,11 @@
+{
+  "study": "ARIO_F15_SYNTHETIC_THIRD_PARTY_CUSTODY",
+  "run_id": "2de52d8b5ded44119c3fc79696e0a161",
+  "older_external_log_index": 206573201,
+  "older_commitment_sha256": "1287f223186e3f71ed5230261d375e8c8070b0eca8384fc30b8de73050b1c5c3",
+  "newest_external_log_index": 206575059,
+  "newest_commitment_sha256": "cf7ad5df590b7b905faefe4bc0ae1e25a20c556887d56179592ddcaa7bfe9a63",
+  "custody": "AUTHOR_RETAINED_TEST_FLOOR_NOT_INDEPENDENT",
+  "merge_authorization": "NOT_GRANTED",
+  "trust_activation": "NO_GO"
+}

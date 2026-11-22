@@ -30,8 +30,8 @@ def blob_id(raw: bytes) -> str:
     return hashlib.sha1(b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw).hexdigest()
 
 
-EXPECTED_71_IDS_SHA256 = "NOT_YET_PINNED"
-EXPECTED_42_RED_IDS_SHA256 = "NOT_YET_PINNED"
+EXPECTED_71_IDS_SHA256 = "230ed51efa79e71a4c8ccf066fc323dc3125ce835d8d03088afa415f98813573"
+EXPECTED_42_RED_IDS_SHA256 = "aa76a48cd48c2b96c6b7febd6b1d69a98a4649a74a646a7f9b0842e40f3d22f3"
 EXACT_ASSERTION_LABELS = frozenset({
     "linked_pr_ci_observed_but_no_merge_permission",
     "pr_head_changed_between_reads",

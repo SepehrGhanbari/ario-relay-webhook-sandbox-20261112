@@ -18,6 +18,9 @@ jobs:
     timeout-minutes: 15
     env:
       PYTHONDONTWRITEBYTECODE: "1"
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+      PYTHONNOUSERSITE: "1"
+      PYTEST_ADDOPTS: ""
     steps:
       - name: Prepare runner-local attempt-scoped report paths
         shell: bash
@@ -40,6 +43,8 @@ jobs:
           git -c credential.helper= clone --quiet --no-tags --depth 1 --single-branch --branch research/ario-self-audit-engine-adapter-v01-20261119 https://github.com/SepehrGhanbari/Ario.git ario
           test "$(git -C ario rev-parse HEAD)" = "14f9da37673b04f7fce90b720a94c27144c15667"
           test "$(git -C ario rev-parse HEAD^{tree})" = "d5a04b86b08dae838c0ddc80d5b1d02a0d467343"
+      - name: Verify source commit/tree and reject untracked/ignored inputs before tests
+        run: python -B lab/guard_v2_isolated_probe.py --verify-source --implementation ario/implementation
       - name: Install version-pinned pytest (transitive deps not immutable)
         run: python -m pip install "pytest==8.4.2"
       - name: Run pinned source tests and preserve individual case IDs

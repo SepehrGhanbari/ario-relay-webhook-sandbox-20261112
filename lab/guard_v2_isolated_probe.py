@@ -30,6 +30,7 @@ def blob_id(raw: bytes) -> str:
     return hashlib.sha1(b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw).hexdigest()
 
 
+EXPECTED_197_IDS_SHA256 = "b41e2aa5ebc5056993e9efa1678725db09a51ecf33498372e81e4c247bb2e929"
 EXPECTED_71_IDS_SHA256 = "230ed51efa79e71a4c8ccf066fc323dc3125ce835d8d03088afa415f98813573"
 EXPECTED_42_RED_IDS_SHA256 = "aa76a48cd48c2b96c6b7febd6b1d69a98a4649a74a646a7f9b0842e40f3d22f3"
 EXACT_ASSERTION_LABELS = frozenset({
@@ -50,6 +51,17 @@ EXACT_ASSERTION_LABELS = frozenset({
 })
 
 
+def git_clean(root: Path) -> None:
+    """Reject tracked edits, untracked files AND Git-ignored executable input."""
+    p = subprocess.run(["git", "-C", str(root), "status", "--porcelain=v1",
+                        "--untracked-files=all", "--ignored=matching"],
+                       capture_output=True, text=True, timeout=20, check=False)
+    if p.returncode:
+        raise AssertionError("GIT_STATUS_FAILED")
+    if p.stdout.strip():
+        raise AssertionError("UNTRACKED_IGNORED_OR_MODIFIED_SOURCE: " + p.stdout[:500])
+
+
 def git_measure(impl: Path) -> dict:
     """Bind claimed identity to supplied Git repo; no independent attestation."""
     def git(*args):
@@ -65,8 +77,7 @@ def git_measure(impl: Path) -> dict:
     tree = git("rev-parse", "HEAD^{tree}")
     if source != SOURCE_HEAD or tree != SOURCE_TREE:
         raise AssertionError("SOURCE_IDENTITY_OR_TREE_DRIFT")
-    if git("status", "--porcelain", "--untracked-files=no"):
-        raise AssertionError("TRACKED_SOURCE_CHANGED")
+    git_clean(root)
     return {"head": source, "tree": tree, "identity": "LOCAL_GIT_OBJECT_ONLY"}
 
 
@@ -107,9 +118,12 @@ def junit(path: Path) -> dict:
 
 def upstream_junit_check(path: Path) -> dict:
     x = junit(path)
-    if x["cases"] != 197 or x["failed"] or x["errors"] or x["skipped"]:
-        raise AssertionError("UPSTREAM_COLLECTION_NOT_EXACTLY_197_PASSES")
-    return {"passed": 197, "fail": 0, "skip": 0, "error": 0}
+    if (x["cases"] != 197 or x["failed"] or x["errors"] or x["skipped"]
+            or x["ids_sha256"] != EXPECTED_197_IDS_SHA256):
+        print("OBSERVED_197_CASE_ID_SHA256 " + x["ids_sha256"])
+        raise AssertionError("UPSTREAM_197_CASE_IDENTITY_OR_OUTCOME_MISMATCH")
+    return {"passed": 197, "fail": 0, "skip": 0, "error": 0,
+            "ids_sha256": x["ids_sha256"], "case_ids": sorted(x["ids"])}
 
 
 def validate_report(path: Path, run_id: str, attempt: str) -> dict:
@@ -385,7 +399,14 @@ def main() -> int:
     ap.add_argument("--upstream-junit")
     ap.add_argument("--verify-report", action="store_true")
     ap.add_argument("--self-test", action="store_true")
+    ap.add_argument("--verify-source", action="store_true")
     args = ap.parse_args()
+    if args.verify_source:
+        if not args.implementation:
+            raise SystemExit("IMPLEMENTATION_REQUIRED_BEFORE_TESTS")
+        print(json.dumps(git_measure(Path(args.implementation).resolve(strict=True)),
+                         sort_keys=True))
+        return 0
     if args.self_test:
         falsify_harness()
         print('HARNESS_FAIL_CLOSED_CONTROLS_3_PASS')
@@ -414,12 +435,14 @@ def main() -> int:
     report["synthetic"] = synthetic_scenarios(impl)
     report["upstream_holds"] = upstream_holds()
     report["mutation_test"] = red_green(impl)
+    git_measure(impl)  # restored exact pinned tree and no rogue/ignored files
     report["public_read_only"] = live_probe(impl)
     report["outcome"] = "PASS_LAB_WITH_UPSTREAM_HOLDS"
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("x", encoding="utf-8") as f:
         f.write(json.dumps(report, sort_keys=True, indent=2, ensure_ascii=True) + "\n")
     validate_report(out, run_id, attempt)
+    print("EXACT_197_CASE_ID_SHA256 " + report["upstream_cases"]["ids_sha256"])
     print(json.dumps(report, sort_keys=True))
     return 0
 

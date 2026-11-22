@@ -1,0 +1,80 @@
+name: Ario Guard V2 isolated cloud research (NO TRUST)
+
+# Only the disposable sandbox research branch is allowed to trigger this suite.
+# GitHub Actions setup/checkout receive scoped token; Ario Python does not.
+# No write endpoints, Check publishing, or PR merge.
+on:
+  push:
+    branches:
+      - research/guard-v2-isolated-cloud-20261122
+
+permissions:
+  contents: read
+
+jobs:
+  ario-guard-rehearsal:
+    name: pinned-research-no-token
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+      PYTHONNOUSERSITE: "1"
+      PYTEST_ADDOPTS: ""
+    steps:
+      - name: Prepare runner-local attempt-scoped report paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ARIO_REPORT_PATH=${RUNNER_TEMP}/ario-guard-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json" >> "$GITHUB_ENV"
+          echo "ARIO_JUNIT_PATH=${RUNNER_TEMP}/ario-source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.xml" >> "$GITHUB_ENV"
+      - name: Checkout isolated sandbox branch (GitHub action gets scoped token)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # pinned v4; Node20 deprecation known
+        with:
+          persist-credentials: false
+      - name: Setup Python (GitHub action gets scoped token)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # pinned v5; Node20 deprecation known
+        with:
+          python-version: "3.13"
+      - name: Clone and bind exact public Ario Git objects, no custom auth
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -c credential.helper= clone --quiet --no-tags --depth 1 --single-branch --branch research/ario-self-audit-engine-adapter-v01-20261119 https://github.com/SepehrGhanbari/Ario.git ario
+          test "$(git -C ario rev-parse HEAD)" = "14f9da37673b04f7fce90b720a94c27144c15667"
+          test "$(git -C ario rev-parse HEAD^{tree})" = "d5a04b86b08dae838c0ddc80d5b1d02a0d467343"
+      - name: Verify source commit/tree and reject untracked/ignored inputs before tests
+        run: python -B lab/guard_v2_isolated_probe.py --verify-source --implementation ario/implementation
+      - name: Install version-pinned pytest (transitive deps not immutable)
+        run: python -m pip install "pytest==8.4.2"
+      - name: Run pinned source tests and preserve individual case IDs
+        working-directory: ario/implementation
+        run: >-
+          python -B -m pytest -p no:cacheprovider -q
+          --junitxml "$ARIO_JUNIT_PATH"
+          tests/test_ario_repo_self_audit.py
+          tests/test_guard_v2_review_graph.py
+          tests/test_guard_v2_trusted_manual.py
+          tests/test_guard_v2_manual_report_r17.py
+          tests/test_guard_v2_manual_report_r19.py
+          tests/test_guard_v2_r21a_red_green.py
+          tests/test_guard_v2_r21a_vocabulary_contract.py
+      - name: Self-falsify missing source, shortened JUnit and stale report
+        run: python -B lab/guard_v2_isolated_probe.py --self-test --upstream-junit "$ARIO_JUNIT_PATH"
+      - name: Run strict RED-to-GREEN and write exclusive current attempt report
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f "$ARIO_REPORT_PATH"
+          python -B lab/guard_v2_isolated_probe.py \
+            --implementation ario/implementation \
+            --upstream-junit "$ARIO_JUNIT_PATH" \
+            --output "$ARIO_REPORT_PATH"
+      - name: Display only validated report from this successful attempt
+        if: success()
+        run: >-
+          python -B lab/guard_v2_isolated_probe.py
+          --verify-report --output "$ARIO_REPORT_PATH"
+      - name: Fail-closed notice; NEVER print a stale PASS file
+        if: failure()
+        run: echo "HOLD - required source/test/report validation failed; no PASS report displayed."

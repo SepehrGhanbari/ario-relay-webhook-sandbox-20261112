@@ -1,0 +1,62 @@
+name: Ario Guard V2 isolated cloud research (NO TRUST)
+
+# Only the disposable sandbox research branch is allowed to trigger this suite.
+# No secrets, no authenticated GitHub reads, no PR-code token, no Check publishing.
+on:
+  push:
+    branches:
+      - research/guard-v2-isolated-cloud-20261122
+
+permissions:
+  contents: read
+
+jobs:
+  ario-guard-rehearsal:
+    name: pinned-research-no-token
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout only the isolated sandbox branch, no credential persistence
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install pinned Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - name: Fetch public Ario pinned branch without authentication
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -c credential.helper= clone --quiet --no-tags --depth 1 --single-branch --branch research/ario-self-audit-engine-adapter-v01-20261119 https://github.com/SepehrGhanbari/Ario.git ario
+          test "$(git -C ario rev-parse HEAD)" = "14f9da37673b04f7fce90b720a94c27144c15667"
+          test "$(git -C ario rev-parse HEAD^{tree})" = "d5a04b86b08dae838c0ddc80d5b1d02a0d467343"
+      - name: Install test runner (no source-controlled dependency setup or credentials)
+        run: python -m pip install "pytest==8.4.2"
+      - name: Reuse real Guard V2 source tests from the exact Ario commit
+        working-directory: ario/implementation
+        run: >-
+          python -B -m pytest -p no:cacheprovider -q
+          tests/test_ario_repo_self_audit.py
+          tests/test_guard_v2_review_graph.py
+          tests/test_guard_v2_trusted_manual.py
+          tests/test_guard_v2_manual_report_r17.py
+          tests/test_guard_v2_manual_report_r19.py
+          tests/test_guard_v2_r21a_red_green.py
+          tests/test_guard_v2_r21a_vocabulary_contract.py
+      - name: Independent cross-check, mutation RED-then-GREEN, optional anonymous GET
+        run: >-
+          python -B lab/guard_v2_isolated_probe.py
+          --implementation ario/implementation
+          --output reports/guard-v2-result.json
+      - name: Display research-only result for independent review
+        if: always()
+        shell: bash
+        run: |
+          if test -f reports/guard-v2-result.json; then
+            cat reports/guard-v2-result.json
+          else
+            echo "HOLD: no completed report; inspect prior failed step."
+          fi

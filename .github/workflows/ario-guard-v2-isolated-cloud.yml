@@ -18,9 +18,13 @@ jobs:
     timeout-minutes: 15
     env:
       PYTHONDONTWRITEBYTECODE: "1"
-      ARIO_REPORT_PATH: ${{ runner.temp }}/ario-guard-${{ github.run_id }}-${{ github.run_attempt }}.json
-      ARIO_JUNIT_PATH: ${{ runner.temp }}/ario-source-${{ github.run_id }}-${{ github.run_attempt }}.xml
     steps:
+      - name: Prepare runner-local attempt-scoped report paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ARIO_REPORT_PATH=${RUNNER_TEMP}/ario-guard-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json" >> "$GITHUB_ENV"
+          echo "ARIO_JUNIT_PATH=${RUNNER_TEMP}/ario-source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.xml" >> "$GITHUB_ENV"
       - name: Checkout isolated sandbox branch (GitHub action gets scoped token)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # pinned v4; Node20 deprecation known
         with:

@@ -104,3 +104,36 @@ action Node20->Node24 warnings, GitHub provider custody and all real-world
 Trust/signer authority remain outside the proven boundary. The known
 older-green-with-new-queued and missing-review-graph-reason findings still
 exist in primary Ario #295 and are NOT modified by this sandbox experiment.
+
+
+## Independent Codex v0.3 review — v0.4 final lab-shape tightening
+
+Codex independently confirmed the real v0.3 run and all 197 original
+JUnit case IDs, 71 validator case IDs, 42 RED failure IDs, 14 fixture-derived
+checks and 16 prior harness controls. It identified THREE narrower potential
+false-green paths; none affected the recorded v0.3 run.
+
+- JUnit parsing is now closed to nested results or unexpected XML wrappers:
+  one optional testsuites root containing one testsuite only; no nested
+  testsuite/testcase, unexpected outcome or multiple outcomes per case.
+  Falsification controls inject nested test suites, hidden nested test cases,
+  and an unexpected XML wrapper; each must be rejected.
+- The live diagnostic has TWO distinct closed shapes: an anonymous successful
+  public read (all source_delivery, required_check_observation and
+  execution_attestation fields mandatory, with exact safe values), or an
+  unavailable anonymous read (only its four allowed fields). A missing
+  success attestation, false status, wrong source delivery, omitted check
+  result or false success under the unavailable shape is rejected.
+  RED/GREEN summary lines must full-match the known pytest count/time
+  syntax, not merely start with the right counts.
+- The harness requires an exact 29-name fixed inventory, not just a
+  printed number. Each original or new positive/negative case is named,
+  run and compared to REQUIRED_HARNESS_CONTROLS. Deleting one fails the
+  self-test. Both a valid available and an unavailable diagnostic are tested.
+
+This is only a test-harness improvement on the same separate experimental
+branch and Draft PR #20; it DOES NOT repair upstream Ario #295's two known
+bugs, source custody, CI freshness after the last read, GitHub Actions
+provider provenance, Node20-to-24 warnings, dependency locking or
+protected-main manual execution. Neither repository main nor any key,
+signer or Trust authority may be altered by this experiment.

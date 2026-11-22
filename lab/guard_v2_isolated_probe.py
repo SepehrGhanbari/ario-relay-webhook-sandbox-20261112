@@ -11,6 +11,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -51,6 +52,39 @@ EXACT_ASSERTION_LABELS = frozenset({
 })
 
 
+REQUIRED_HARNESS_CONTROLS = frozenset({
+    "fake_source_directory",
+    "untracked_conftest",
+    "ignored_pytest_ini",
+    "same_count_swapped_junit_id",
+    "short_junit_collection",
+    "baseline_valid_report",
+    "stale_run_attempt",
+    "stale_run_id",
+    "changed_report_schema",
+    "false_merge_authority",
+    "failed_synthetic_assertion",
+    "missing_reproduced_upstream_hold",
+    "mutated_197_case_ids",
+    "false_race_clearance",
+    "mutated_42_failure_digest",
+    "unexpected_report_authority_key",
+    "nested_junit_extra_suite",
+    "nested_junit_extra_testcase_outcome",
+    "unexpected_junit_root_wrapper",
+    "successful_live_read_complete_baseline",
+    "unavailable_live_read_complete_baseline",
+    "successful_live_read_missing_attestation",
+    "successful_live_read_invalid_observation",
+    "successful_live_read_invalid_delivery",
+    "successful_live_read_missing_check_result",
+    "unavailable_live_read_with_positive_observation",
+    "red_summary_suffix_forgery",
+    "green_summary_suffix_forgery",
+    "red_summary_wrong_exact_count",
+})
+
+
 def git_clean(root: Path) -> None:
     """Reject tracked edits, untracked files AND Git-ignored executable input."""
     p = subprocess.run(["git", "-C", str(root), "status", "--porcelain=v1",
@@ -82,38 +116,68 @@ def git_measure(impl: Path) -> dict:
 
 
 def junit(path: Path) -> dict:
+    """Reject hidden nested JUnit results instead of counting only visible direct cases."""
     root = ET.parse(path).getroot()
-    suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
-    if len(suites) != 1:
-        raise AssertionError("JUNIT_SINGLE_SUITE_REQUIRED")
-    suite = suites[0]
-    cases = list(suite.findall("testcase"))
-    ids, failed, errors, skipped = [], [], [], []
-    for t in cases:
-        a = t.get("classname")
-        b = t.get("name")
+    if root.tag == "testsuite":
+        suite = root
+    elif root.tag == "testsuites":
+        children = list(root)
+        if len(children) != 1 or children[0].tag != "testsuite":
+            raise AssertionError("JUNIT_UNEXPECTED_WRAPPER_OR_NESTED_SUITE")
+        suite = children[0]
+    else:
+        raise AssertionError("JUNIT_UNEXPECTED_ROOT")
+    ids, failures, errors, skipped = [], [], [], []
+    for item in suite:
+        if item.tag == "properties":
+            if any(p.tag != "property" or len(p) for p in item):
+                raise AssertionError("JUNIT_NESTED_SUITE_PROPERTIES")
+            continue
+        if item.tag in ("system-out", "system-err"):
+            if len(item):
+                raise AssertionError("JUNIT_NESTED_TESTCASE_IN_SUITE_OUTPUT")
+            continue
+        if item.tag != "testcase":
+            raise AssertionError("JUNIT_UNEXPECTED_SUITE_CHILD")
+        a, b = item.get("classname"), item.get("name")
         if not a or not b:
-            raise AssertionError("JUNIT_ID_MISSING")
-        name = a + "::" + b
-        ids.append(name)
-        if t.find("failure") is not None:
-            failed.append(name)
-        if t.find("error") is not None:
-            errors.append(name)
-        if t.find("skipped") is not None:
-            skipped.append(name)
+            raise AssertionError("JUNIT_CASE_ID_MISSING")
+        identifier = a + "::" + b
+        ids.append(identifier)
+        seen_outcomes = []
+        for child in item:
+            if child.tag in ("failure", "error", "skipped"):
+                if len(child):
+                    raise AssertionError("JUNIT_NESTED_OUTCOME_CONTENT")
+                seen_outcomes.append(child.tag)
+            elif child.tag in ("system-out", "system-err"):
+                if len(child):
+                    raise AssertionError("JUNIT_CASE_OUTPUT_CONTAINS_RESULTS")
+            elif child.tag == "properties":
+                if any(p.tag != "property" or len(p) for p in child):
+                    raise AssertionError("JUNIT_INVALID_CASE_PROPERTIES")
+            else:
+                raise AssertionError("JUNIT_UNEXPECTED_NESTED_TESTCASE_OR_SUITE")
+        if len(seen_outcomes) > 1:
+            raise AssertionError("JUNIT_MULTIPLE_OUTCOMES_PER_CASE")
+        if seen_outcomes:
+            {"failure": failures, "error": errors, "skipped": skipped}[seen_outcomes[0]].append(identifier)
     if len(set(ids)) != len(ids):
         raise AssertionError("DUPLICATE_TEST_ID")
-    for label, actual in (("tests", ids), ("failures", failed),
+    for key, observed in (("tests", ids), ("failures", failures),
                           ("errors", errors), ("skipped", skipped)):
-        if int(suite.get(label, "-1")) != len(actual):
-            raise AssertionError("JUNIT_DECLARED_COUNT_MISMATCH_" + label)
-    def digest(values):
-        return hashlib.sha256(("\n".join(sorted(values)) + "\n").encode("utf-8")).hexdigest()
-    return {"ids": set(ids), "failed_ids": set(failed),
-            "cases": len(ids), "failed": len(failed),
-            "errors": len(errors), "skipped": len(skipped),
-            "ids_sha256": digest(ids), "red_sha256": digest(failed)}
+        try:
+            expected = int(suite.get(key, "-1"))
+        except ValueError as exc:
+            raise AssertionError("JUNIT_COUNTER_MALFORMED_" + key) from exc
+        if expected != len(observed):
+            raise AssertionError("JUNIT_COUNT_MISMATCH_" + key)
+    def digest(items):
+        return hashlib.sha256(("\n".join(sorted(items)) + "\n").encode("utf-8")).hexdigest()
+    return {"ids": set(ids), "failed_ids": set(failures),
+            "cases": len(ids), "failed": len(failures), "errors": len(errors),
+            "skipped": len(skipped), "ids_sha256": digest(ids),
+            "red_sha256": digest(failures)}
 
 
 def upstream_junit_check(path: Path) -> dict:
@@ -171,9 +235,8 @@ def valid_example(upstream: dict, run_id: str, attempt: str) -> dict:
         },
         "public_read_only": {
             "status": "UNKNOWN", "authority": "NONE",
-            "reason": "TEST_OFFLINE_UNATTESTED",
-            "note": "Only a synthetic read",
-            "execution_attestation": "NOT_ESTABLISHED",
+            "reason": "OSError",
+            "note": "Unauthenticated optional read unavailable; no positive claim",
         },
     }
 
@@ -262,42 +325,69 @@ def validate_report(path: Path, run_id: str, attempt: str) -> dict:
             or mut["legacy_blob"] != OLD_VALIDATOR_BLOB
             or mut["current_blob"] != NEW_VALIDATOR_BLOB
             or type(mut["red_summary"]) is not str
-            or not mut["red_summary"].startswith("42 failed, 29 passed ")
+            or re.fullmatch(r"42 failed, 29 passed in [0-9]+(?:\.[0-9]+)?s",
+                            mut["red_summary"]) is None
             or type(mut["green_summary"]) is not str
-            or not mut["green_summary"].startswith("71 passed ")):
+            or re.fullmatch(r"71 passed in [0-9]+(?:\.[0-9]+)?s",
+                            mut["green_summary"]) is None):
         raise AssertionError("INVALID_MUTATION_RESULT")
 
     live = v["public_read_only"]
-    if (type(live) is not dict
-            or not set(live).issubset({
-                "status", "authority", "reason", "note", "execution_attestation",
-                "required_check_observation", "source_delivery"
-            })
-            or not {"status", "authority", "reason", "note"}.issubset(live)
-            or live["status"] != "UNKNOWN" or live["authority"] != "NONE"
-            or type(live["reason"]) is not str or not live["reason"]
-            or type(live["note"]) is not str or not live["note"]
-            or live.get("execution_attestation", "NOT_ESTABLISHED") != "NOT_ESTABLISHED"):
-        raise AssertionError("INVALID_LIVE_UNATTESTED_RESULT")
+    if type(live) is not dict or live.get("status") != "UNKNOWN":
+        raise AssertionError("LIVE_DIAGNOSTIC_NOT_UNKNOWN")
+    success_keys = {"status", "authority", "reason", "note",
+                    "execution_attestation", "required_check_observation",
+                    "source_delivery"}
+    unavailable_keys = {"status", "authority", "reason", "note"}
+    if set(live) == success_keys:
+        if (live["authority"] != "NONE"
+                or live["execution_attestation"] != "NOT_ESTABLISHED"
+                or live["source_delivery"] != "GITHUB_API_RESPONSE_UNATTESTED"
+                or live["required_check_observation"] not in (
+                    "REPORTED_SUCCESS_BY_LINKED_PR_RUN", "NOT_CONFIRMED")
+                or live["reason"] != "NON_AUTHORITATIVE_GITHUB_METADATA_READBACK"
+                or live["note"] !=
+                    "Unauthenticated public GET, not independent attestation"):
+            raise AssertionError("UNEXPECTED_LIVE_SUCCESS_SHAPE_OR_VALUES")
+    elif set(live) == unavailable_keys:
+        if (live["authority"] != "NONE"
+                or type(live["reason"]) is not str
+                or live["reason"] not in (
+                    "OSError", "TimeoutError", "RuntimeError", "ValueError",
+                    "HTTPError", "URLError", "ConnectionError")
+                or live["note"] !=
+                    "Unauthenticated optional read unavailable; no positive claim"):
+            raise AssertionError("UNEXPECTED_LIVE_UNAVAILABLE_SHAPE_OR_VALUES")
+    else:
+        raise AssertionError("LIVE_REPORT_HAS_MISSING_OR_EXTRA_FIELDS")
     return v
 
 
 def falsify_harness(source_xml: Path) -> dict:
-    """Valid fixture first; mutate only one property per negative control."""
+    """Require a fixed inventory of falsifiable controls, not just a count."""
     upstream = upstream_junit_check(source_xml)
-    checks = 0
-    with tempfile.TemporaryDirectory(prefix="guard-harness-controls-") as temp:
-        root = Path(temp)
-        (root / "implementation").mkdir()
-        try:
-            git_measure(root / "implementation")
-        except (AssertionError, OSError):
-            checks += 1
-        else:
-            raise AssertionError("FAKE_SOURCE_DIR_PASSED")
+    passed = set()
 
-        # A self-contained Git repository with a TRACKED .gitignore:
-        # tests must catch both unexpected untracked and ignored input.
+    def accept(label, func):
+        func()
+        if label in passed:
+            raise AssertionError("DUPLICATE_HARNESS_CONTROL_" + label)
+        passed.add(label)
+
+    def reject(label, func):
+        try:
+            func()
+        except (AssertionError, ValueError, TypeError, KeyError, ET.ParseError):
+            if label in passed:
+                raise AssertionError("DUPLICATE_HARNESS_CONTROL_" + label)
+            passed.add(label)
+        else:
+            raise AssertionError("FALSE_GREEN_HARNESS_CONTROL_" + label)
+
+    with tempfile.TemporaryDirectory(prefix="guard-v2-harness-") as folder:
+        root = Path(folder)
+        (root / "implementation").mkdir()
+        reject("fake_source_directory", lambda: git_measure(root / "implementation"))
         g = root / "git-fixture"
         subprocess.run(["git", "init", "-q", str(g)], check=True)
         (g / ".gitignore").write_text("pytest.ini\n", encoding="utf-8")
@@ -306,86 +396,163 @@ def falsify_harness(source_xml: Path) -> dict:
                         "-c", "user.email=ario-lab@example.invalid",
                         "commit", "-q", "-m", "fixture"], check=True)
         git_clean(g)
-        for path, content in (("conftest.py", "def pytest_sessionstart(s): pass\n"),
-                              ("pytest.ini", "[pytest]\n")):
-            f = g / path
-            f.write_text(content, encoding="utf-8")
+        for label, filename, content in (
+            ("untracked_conftest", "conftest.py", "def pytest_sessionstart(s): pass\n"),
+            ("ignored_pytest_ini", "pytest.ini", "[pytest]\n")
+        ):
+            candidate = g / filename
+            candidate.write_text(content, encoding="utf-8")
             try:
-                git_clean(g)
-            except AssertionError:
-                checks += 1
-            else:
-                raise AssertionError("UNTRACKED_OR_IGNORED_FILE_ACCEPTED_" + path)
-            f.unlink()
+                reject(label, lambda: git_clean(g))
+            finally:
+                candidate.unlink()
         git_clean(g)
 
+        def write_junit(name, root_node):
+            path = root / name
+            ET.ElementTree(root_node).write(path, encoding="utf-8", xml_declaration=True)
+            return path
+
         tree = ET.parse(source_xml)
-        case = tree.getroot().find(".//testcase")
-        if case is None:
-            raise AssertionError("NO_JUNIT_CASE_FOR_SUBSTITUTION")
-        case.set("name", case.get("name", "") + "_SUBSTITUTED")
-        swap = root / "same-count.xml"
-        tree.write(swap, encoding="utf-8", xml_declaration=True)
-        try:
-            upstream_junit_check(swap)
-        except AssertionError:
-            checks += 1
-        else:
-            raise AssertionError("SAME_COUNT_SWAPPED_ID_ACCEPTED")
+        altered = copy.deepcopy(tree.getroot())
+        first = altered.find(".//testcase")
+        if first is None:
+            raise AssertionError("NO_JUNIT_TESTCASES_TO_MUTATE")
+        first.set("name", first.get("name", "") + "_SUBSTITUTED")
+        reject("same_count_swapped_junit_id",
+               lambda: upstream_junit_check(write_junit("swapped.xml", altered)))
+        short = root / "short.xml"
+        short.write_text('<testsuite tests="1" failures="0" errors="0" skipped="0">'
+                         '<testcase classname="x" name="one"/></testsuite>',
+                         encoding="utf-8")
+        reject("short_junit_collection", lambda: upstream_junit_check(short))
 
-        few = root / "short.xml"
-        few.write_text('<testsuite tests="1" failures="0" errors="0" skipped="0">'
-                       '<testcase classname="x" name="one"/></testsuite>',
-                       encoding="utf-8")
-        try:
-            upstream_junit_check(few)
-        except AssertionError:
-            checks += 1
-        else:
-            raise AssertionError("SHORT_COLLECTION_ACCEPTED")
+        nested = copy.deepcopy(tree.getroot())
+        parent_suite = nested if nested.tag == "testsuite" else nested.find("testsuite")
+        if parent_suite is None:
+            raise AssertionError("MISSING_UPSTREAM_JUNIT_SUITE")
+        rogue_suite = ET.SubElement(parent_suite, "testsuite", {
+            "tests": "1", "failures": "1", "errors": "0", "skipped": "0"
+        })
+        fake_case = ET.SubElement(rogue_suite, "testcase", {
+            "classname": "unobserved", "name": "hidden_result"
+        })
+        ET.SubElement(fake_case, "failure", {"message": "hidden"})
+        reject("nested_junit_extra_suite",
+               lambda: upstream_junit_check(write_junit("nested-suite.xml", nested)))
 
-        baseline = valid_example(upstream, "7", "1")
-        report = root / "sample.json"
-        def assert_result(value, expected_run="7", expected_attempt="1",
-                          must_pass=False):
-            report.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
-            try:
-                validate_report(report, expected_run, expected_attempt)
-            except (AssertionError, ValueError, TypeError, KeyError):
-                if must_pass:
-                    raise
-                return
-            if not must_pass:
-                raise AssertionError("CORRUPTED_OR_STALE_REPORT_PASSED")
-        assert_result(baseline, must_pass=True)
-        checks += 1
-        assert_result(baseline, expected_attempt="2")
-        assert_result(baseline, expected_run="8")
-        checks += 2
+        nested_case = copy.deepcopy(tree.getroot())
+        first_case = nested_case.find(".//testcase")
+        if first_case is None:
+            raise AssertionError("MISSING_UPSTREAM_JUNIT_CASE")
+        rogue_case = ET.SubElement(first_case, "testcase", {
+            "classname": "unobserved", "name": "nested_error"
+        })
+        ET.SubElement(rogue_case, "error", {"message": "nested"})
+        reject("nested_junit_extra_testcase_outcome",
+               lambda: upstream_junit_check(write_junit("nested-case.xml", nested_case)))
+        wrapper = ET.Element("unknown_junit_wrapper")
+        wrapper.append(copy.deepcopy(tree.getroot()))
+        reject("unexpected_junit_root_wrapper",
+               lambda: upstream_junit_check(write_junit("bad-root.xml", wrapper)))
 
-        for problem in ("schema", "authority", "synthetic", "upstream",
-                        "case_ids", "race", "digest", "extra_key"):
-            bad = copy.deepcopy(baseline)
-            if problem == "schema":
-                bad["schema"] = "FAKE_SCHEMA"
-            elif problem == "authority":
-                bad["has_merge_authority"] = True
-            elif problem == "synthetic":
-                bad["synthetic"]["scenarios"][sorted(EXACT_ASSERTION_LABELS)[0]] = "FAIL"
-            elif problem == "upstream":
-                bad["upstream_holds"]["old_linked_green_new_same_head_queued"]["reproduced"] = False
-            elif problem == "case_ids":
-                bad["upstream_cases"]["case_ids"][0] += "_SWAPPED"
-                bad["upstream_cases"]["case_ids"].sort()
-            elif problem == "race":
-                bad["upstream_holds"]["last_sample_race"] = "COMPLETE"
-            elif problem == "digest":
-                bad["mutation_test"]["red_digest"] = "0" * 64
+        sample = valid_example(upstream, "7", "1")
+        report_path = root / "report.json"
+        def verify_doc(payload, run="7", attempt="1"):
+            report_path.write_text(json.dumps(payload, sort_keys=True),
+                                   encoding="utf-8")
+            return validate_report(report_path, run, attempt)
+        accept("baseline_valid_report", lambda: verify_doc(sample))
+        reject("stale_run_attempt", lambda: verify_doc(sample, attempt="2"))
+        reject("stale_run_id", lambda: verify_doc(sample, run="8"))
+        for label, mutation in (
+            ("changed_report_schema", "schema"),
+            ("false_merge_authority", "authority"),
+            ("failed_synthetic_assertion", "synthetic"),
+            ("missing_reproduced_upstream_hold", "hold"),
+            ("mutated_197_case_ids", "case_ids"),
+            ("false_race_clearance", "race"),
+            ("mutated_42_failure_digest", "digest"),
+            ("unexpected_report_authority_key", "extra_key"),
+        ):
+            value = copy.deepcopy(sample)
+            if mutation == "schema":
+                value["schema"] = "FAKE_SCHEMA"
+            elif mutation == "authority":
+                value["has_merge_authority"] = True
+            elif mutation == "synthetic":
+                value["synthetic"]["scenarios"][sorted(EXACT_ASSERTION_LABELS)[0]] = "FAIL"
+            elif mutation == "hold":
+                value["upstream_holds"]["old_linked_green_new_same_head_queued"]["reproduced"] = False
+            elif mutation == "case_ids":
+                value["upstream_cases"]["case_ids"][0] += "_SWAPPED"
+                value["upstream_cases"]["case_ids"].sort()
+            elif mutation == "race":
+                value["upstream_holds"]["last_sample_race"] = "COMPLETE"
+            elif mutation == "digest":
+                value["mutation_test"]["red_digest"] = "0" * 64
             else:
-                bad["approved"] = True
-            assert_result(bad)
-            checks += 1
-    return {"falsification_assertions": checks, "result": "PASS_NEGATIVE_CONTROLS"}
+                value["approved"] = True
+            reject(label, lambda v=value: verify_doc(v))
+
+        success = {
+            "status": "UNKNOWN", "authority": "NONE",
+            "reason": "NON_AUTHORITATIVE_GITHUB_METADATA_READBACK",
+            "required_check_observation": "REPORTED_SUCCESS_BY_LINKED_PR_RUN",
+            "source_delivery": "GITHUB_API_RESPONSE_UNATTESTED",
+            "execution_attestation": "NOT_ESTABLISHED",
+            "note": "Unauthenticated public GET, not independent attestation",
+        }
+        good_success = copy.deepcopy(sample)
+        good_success["public_read_only"] = copy.deepcopy(success)
+        accept("successful_live_read_complete_baseline",
+               lambda: verify_doc(good_success))
+        accept("unavailable_live_read_complete_baseline",
+               lambda: verify_doc(sample))
+        for label, change in (
+            ("successful_live_read_missing_attestation", "attestation"),
+            ("successful_live_read_invalid_observation", "observation"),
+            ("successful_live_read_invalid_delivery", "delivery"),
+            ("successful_live_read_missing_check_result", "missing_check"),
+        ):
+            candidate = copy.deepcopy(good_success)
+            live = candidate["public_read_only"]
+            if change == "attestation":
+                live.pop("execution_attestation")
+            elif change == "observation":
+                live["required_check_observation"] = "AUTHORIZED"
+            elif change == "delivery":
+                live["source_delivery"] = "VERIFIED_BY_PUBLISHER"
+            else:
+                live.pop("required_check_observation")
+            reject(label, lambda v=candidate: verify_doc(v))
+        unavailable = copy.deepcopy(sample)
+        unavailable["public_read_only"]["required_check_observation"] = (
+            "REPORTED_SUCCESS_BY_LINKED_PR_RUN"
+        )
+        reject("unavailable_live_read_with_positive_observation",
+               lambda: verify_doc(unavailable))
+
+        for label, change in (
+            ("red_summary_suffix_forgery", "red_suffix"),
+            ("green_summary_suffix_forgery", "green_suffix"),
+            ("red_summary_wrong_exact_count", "red_wrong"),
+        ):
+            value = copy.deepcopy(sample)
+            if change == "red_suffix":
+                value["mutation_test"]["red_summary"] += " APPROVED"
+            elif change == "green_suffix":
+                value["mutation_test"]["green_summary"] += "\n1 failed"
+            else:
+                value["mutation_test"]["red_summary"] = "42 failed, 29 passed in N/A"
+            reject(label, lambda v=value: verify_doc(v))
+
+    if passed != REQUIRED_HARNESS_CONTROLS:
+        raise AssertionError("HARNESS_REQUIRED_CONTROL_INVENTORY_MISMATCH: "
+                             + repr(sorted(REQUIRED_HARNESS_CONTROLS - passed)))
+    return {"falsification_assertions": len(passed),
+            "control_ids": sorted(passed),
+            "status": "PASS_FIXED_CONTROL_INVENTORY"}
 
 
 def red_green(impl: Path) -> dict:
@@ -628,6 +795,9 @@ def main() -> int:
         if not args.upstream_junit:
             raise SystemExit("REAL_SOURCE_JUNIT_REQUIRED_FOR_SELF_TEST")
         controls = falsify_harness(Path(args.upstream_junit))
+        if (controls["falsification_assertions"] != len(REQUIRED_HARNESS_CONTROLS)
+                or controls["control_ids"] != sorted(REQUIRED_HARNESS_CONTROLS)):
+            raise AssertionError("HARNESS_FIXED_INVENTORY_NOT_ENFORCED")
         print("HARNESS_NEGATIVE_CONTROLS " + json.dumps(controls, sort_keys=True))
         return 0
     run_id, attempt = os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("GITHUB_RUN_ATTEMPT", "")

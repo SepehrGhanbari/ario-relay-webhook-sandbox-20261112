@@ -75,3 +75,32 @@ remain `PASS_SYNTHETIC_ONLY` or fail-closed, never `AUTHORIZED`.
 Exact JUnit identity and expected 42 failure IDs require a reviewed SHA-256 pin; the first run with the NOT_YET_PINNED sentinel MUST fail closed and print candidate digests for independent review. After freezing IDs, rerun from this same sandbox-only branch. Main Ario and all secrets remain untouched.
 
 The source is independently checked against the local actual Git SHA/tree in the harness (local object identity only). Previous stale report display is removed in favor of per-run-attempt exclusive report and success-only display. The original 14 groups reuse upstream fixtures and MUST NOT be represented as 14 independent mechanisms. Remaining upstream weaknesses in #295 are recorded as HOLD, not fixed by the sandbox harness. Pinned Node20 actions still emit deprecation warnings; transitive dependency closure remains mutable.
+
+
+## Codex v0.2 second review: v0.3 exact-evidence-gate amendments
+
+This revision specifically addresses the remaining three **sandbox harness**
+verification gaps identified at head e78c7a7:
+
+1. Pin ALL 197 upstream pytest IDs, not only their count, to the independently
+   recomputed SHA-256 b41e2aa5ebc5056993e9efa1678725db09a51ecf33498372e81e4c247bb2e929.
+   Publish sorted case IDs in the run-attempt report. A same-count ID replacement
+   is a deliberate failing negative control.
+2. Verify the WHOLE closed report schema (run/attempt, complete upstream
+   identities and outcomes, full 14 PASS labels, both reproduced upstream
+   HOLD statuses, mutation ID hashes and results, source SHA/tree and false
+   authority, optional anonymous result still UNKNOWN). Negative controls
+   mutate an otherwise fully valid report so the claimed dimension is actually
+   responsible for rejection.
+3. Verify Git object identity and reject tracked, untracked AND Git-ignored
+   input files BEFORE the first upstream test; retest after validator mutation.
+   Isolate pytest from auto-loaded external plugins and user site packages.
+   Synthetic controls specifically introduce untracked conftest.py and
+   Git-ignored pytest.ini inside an independent temporary Git repository.
+
+These checks establish only **repository-local Git object consistency**.
+Moving runner image, Python patch level, PyPI transitive dependencies,
+action Node20->Node24 warnings, GitHub provider custody and all real-world
+Trust/signer authority remain outside the proven boundary. The known
+older-green-with-new-queued and missing-review-graph-reason findings still
+exist in primary Ario #295 and are NOT modified by this sandbox experiment.

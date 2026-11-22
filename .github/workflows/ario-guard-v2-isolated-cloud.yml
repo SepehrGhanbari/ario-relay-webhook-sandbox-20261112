@@ -60,7 +60,7 @@ jobs:
           tests/test_guard_v2_r21a_red_green.py
           tests/test_guard_v2_r21a_vocabulary_contract.py
       - name: Self-falsify missing source, shortened JUnit and stale report
-        run: python -B lab/guard_v2_isolated_probe.py --self-test
+        run: python -B lab/guard_v2_isolated_probe.py --self-test --upstream-junit "$ARIO_JUNIT_PATH"
       - name: Run strict RED-to-GREEN and write exclusive current attempt report
         shell: bash
         run: |

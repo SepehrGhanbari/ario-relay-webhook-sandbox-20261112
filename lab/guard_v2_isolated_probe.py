@@ -126,50 +126,267 @@ def upstream_junit_check(path: Path) -> dict:
             "ids_sha256": x["ids_sha256"], "case_ids": sorted(x["ids"])}
 
 
+def case_digest(values: list[str]) -> str:
+    return hashlib.sha256(("\n".join(sorted(values)) + "\n").encode("utf-8")).hexdigest()
+
+
+def exact_keys(value: object, keys: set[str], label: str) -> dict:
+    if type(value) is not dict or set(value) != keys:
+        raise AssertionError("REPORT_KEY_SET_" + label)
+    return value
+
+
+def valid_example(upstream: dict, run_id: str, attempt: str) -> dict:
+    """Entirely valid fixture for independent negative controls."""
+    return {
+        "schema": "ARIO-GUARD-V2-ISOLATED-CLOUD-LAB-0.2",
+        "source_head": SOURCE_HEAD, "source_tree": SOURCE_TREE,
+        "local_git_object_identity_only": True,
+        "run_id": run_id, "run_attempt": attempt,
+        "sandbox_only": True, "has_real_signer": False, "has_real_key": False,
+        "has_merge_authority": False, "has_trust_authority": False,
+        "outcome": "PASS_LAB_WITH_UPSTREAM_HOLDS", "upstream_cases": upstream,
+        "synthetic": {
+            "count": 14, "scenarios": {x: "PASS" for x in EXACT_ASSERTION_LABELS},
+            "disposition": "SYNTHETIC_HOLD_ONLY", "fixture_reuse": True,
+            "independent_designs": "NOT_ESTABLISHED",
+        },
+        "upstream_holds": {
+            "old_linked_green_new_same_head_queued":
+                {"reproduced": True, "status": "UPSTREAM_HOLD_NOT_FIXED"},
+            "missing_success_review_graph_reason":
+                {"reproduced": True, "status": "UPSTREAM_HOLD_NOT_FIXED"},
+            "last_sample_race": "UNKNOWN_NOT_ATOMIC",
+        },
+        "mutation_test": {
+            "outcome": "RED_TO_GREEN_IDENTICAL_CASE_SET",
+            "red_exit": 1, "green_exit": 0,
+            "red_summary": "42 failed, 29 passed in 0.10s",
+            "green_summary": "71 passed in 0.10s",
+            "case_digest": EXPECTED_71_IDS_SHA256,
+            "red_digest": EXPECTED_42_RED_IDS_SHA256,
+            "expected_failures": 42, "full_cases": 71,
+            "legacy_blob": OLD_VALIDATOR_BLOB,
+            "current_blob": NEW_VALIDATOR_BLOB,
+        },
+        "public_read_only": {
+            "status": "UNKNOWN", "authority": "NONE",
+            "reason": "TEST_OFFLINE_UNATTESTED",
+            "note": "Only a synthetic read",
+            "execution_attestation": "NOT_ESTABLISHED",
+        },
+    }
+
+
 def validate_report(path: Path, run_id: str, attempt: str) -> dict:
-    z = json.loads(path.read_text(encoding="utf-8"))
-    if (not run_id.isdecimal() or not attempt.isdecimal()
-            or z.get("run_id") != run_id or z.get("run_attempt") != attempt
-            or z.get("source_head") != SOURCE_HEAD or z.get("source_tree") != SOURCE_TREE
-            or z.get("outcome") != "PASS_LAB_WITH_UPSTREAM_HOLDS"
-            or z.get("upstream_cases", {}).get("passed") != 197
-            or z.get("synthetic", {}).get("count") != 14
-            or z.get("mutation_test", {}).get("case_digest") != EXPECTED_71_IDS_SHA256
-            or z.get("mutation_test", {}).get("red_digest") != EXPECTED_42_RED_IDS_SHA256):
-        raise AssertionError("STALE_OR_INCOMPLETE_SUCCESS_REPORT")
-    return z
+    """Full, closed-schema validation; no authority from a passing lab."""
+    raw = path.read_bytes()
+    if not raw or len(raw) > 65536:
+        raise AssertionError("REPORT_EMPTY_OR_OVERSIZED")
+    def no_duplicate_keys(pairs):
+        out = {}
+        for key, val in pairs:
+            if key in out:
+                raise AssertionError("DUPLICATE_REPORT_KEY")
+            out[key] = val
+        return out
+    value = json.loads(raw.decode("utf-8"), object_pairs_hook=no_duplicate_keys)
+    v = exact_keys(value, {
+        "schema", "source_head", "source_tree", "local_git_object_identity_only",
+        "run_id", "run_attempt", "sandbox_only", "has_real_signer",
+        "has_real_key", "has_merge_authority", "has_trust_authority",
+        "outcome", "upstream_cases", "synthetic", "upstream_holds",
+        "mutation_test", "public_read_only"
+    }, "TOP")
+    if (type(run_id) is not str or not run_id.isascii() or not run_id.isdecimal()
+            or type(attempt) is not str or not attempt.isascii() or not attempt.isdecimal()
+            or v["run_id"] != run_id or v["run_attempt"] != attempt
+            or v["schema"] != "ARIO-GUARD-V2-ISOLATED-CLOUD-LAB-0.2"
+            or v["source_head"] != SOURCE_HEAD or v["source_tree"] != SOURCE_TREE
+            or v["local_git_object_identity_only"] is not True
+            or v["sandbox_only"] is not True
+            or v["outcome"] != "PASS_LAB_WITH_UPSTREAM_HOLDS"
+            or any(v[k] is not False for k in (
+                "has_real_signer", "has_real_key",
+                "has_merge_authority", "has_trust_authority"))):
+        raise AssertionError("INVALID_REPORT_CONTEXT_OR_AUTHORITY")
+
+    u = exact_keys(v["upstream_cases"], {
+        "passed", "fail", "skip", "error", "ids_sha256", "case_ids"
+    }, "197")
+    ids = u["case_ids"]
+    if (any(type(u[k]) is not int for k in ("passed", "fail", "skip", "error"))
+            or [u["passed"], u["fail"], u["skip"], u["error"]] != [197, 0, 0, 0]
+            or type(ids) is not list or len(ids) != 197
+            or any(type(x) is not str or not x for x in ids)
+            or len(set(ids)) != 197 or ids != sorted(ids)
+            or u["ids_sha256"] != EXPECTED_197_IDS_SHA256
+            or case_digest(ids) != EXPECTED_197_IDS_SHA256):
+        raise AssertionError("INVALID_197_TEST_IDENTITIES")
+
+    synth = exact_keys(v["synthetic"], {
+        "count", "scenarios", "disposition", "fixture_reuse", "independent_designs"
+    }, "SYNTHETIC")
+    outcomes = exact_keys(synth["scenarios"], set(EXACT_ASSERTION_LABELS), "14")
+    if (type(synth["count"]) is not int or synth["count"] != 14
+            or any(x != "PASS" for x in outcomes.values())
+            or synth["disposition"] != "SYNTHETIC_HOLD_ONLY"
+            or synth["fixture_reuse"] is not True
+            or synth["independent_designs"] != "NOT_ESTABLISHED"):
+        raise AssertionError("INVALID_14_SYNTHETIC_RESULTS")
+
+    held = exact_keys(v["upstream_holds"], {
+        "old_linked_green_new_same_head_queued",
+        "missing_success_review_graph_reason", "last_sample_race"
+    }, "UPSTREAM_HOLD")
+    for key in ("old_linked_green_new_same_head_queued",
+                "missing_success_review_graph_reason"):
+        h = exact_keys(held[key], {"reproduced", "status"}, "HOLD_REPRO")
+        if h["reproduced"] is not True or h["status"] != "UPSTREAM_HOLD_NOT_FIXED":
+            raise AssertionError("UPSTREAM_ISSUE_NOT_REPRODUCED")
+    if held["last_sample_race"] != "UNKNOWN_NOT_ATOMIC":
+        raise AssertionError("UNKNOWN_RACE_FALSELY_RESOLVED")
+
+    mut = exact_keys(v["mutation_test"], {
+        "outcome", "red_exit", "green_exit", "red_summary", "green_summary",
+        "case_digest", "red_digest", "expected_failures", "full_cases",
+        "legacy_blob", "current_blob"
+    }, "RED_GREEN")
+    if (mut["outcome"] != "RED_TO_GREEN_IDENTICAL_CASE_SET"
+            or any(type(mut[k]) is not int for k in (
+                "red_exit", "green_exit", "expected_failures", "full_cases"))
+            or [mut["red_exit"], mut["green_exit"],
+                mut["expected_failures"], mut["full_cases"]] != [1, 0, 42, 71]
+            or mut["case_digest"] != EXPECTED_71_IDS_SHA256
+            or mut["red_digest"] != EXPECTED_42_RED_IDS_SHA256
+            or mut["legacy_blob"] != OLD_VALIDATOR_BLOB
+            or mut["current_blob"] != NEW_VALIDATOR_BLOB
+            or type(mut["red_summary"]) is not str
+            or not mut["red_summary"].startswith("42 failed, 29 passed ")
+            or type(mut["green_summary"]) is not str
+            or not mut["green_summary"].startswith("71 passed ")):
+        raise AssertionError("INVALID_MUTATION_RESULT")
+
+    live = v["public_read_only"]
+    if (type(live) is not dict
+            or not set(live).issubset({
+                "status", "authority", "reason", "note", "execution_attestation",
+                "required_check_observation", "source_delivery"
+            })
+            or not {"status", "authority", "reason", "note"}.issubset(live)
+            or live["status"] != "UNKNOWN" or live["authority"] != "NONE"
+            or type(live["reason"]) is not str or not live["reason"]
+            or type(live["note"]) is not str or not live["note"]
+            or live.get("execution_attestation", "NOT_ESTABLISHED") != "NOT_ESTABLISHED"):
+        raise AssertionError("INVALID_LIVE_UNATTESTED_RESULT")
+    return v
 
 
-def falsify_harness() -> None:
-    """Prove standalone fake repo, short JUnit and stale report are rejected."""
-    with tempfile.TemporaryDirectory() as folder:
-        p = Path(folder)
-        (p / "implementation").mkdir()
+def falsify_harness(source_xml: Path) -> dict:
+    """Valid fixture first; mutate only one property per negative control."""
+    upstream = upstream_junit_check(source_xml)
+    checks = 0
+    with tempfile.TemporaryDirectory(prefix="guard-harness-controls-") as temp:
+        root = Path(temp)
+        (root / "implementation").mkdir()
         try:
-            git_measure(p / "implementation")
+            git_measure(root / "implementation")
         except (AssertionError, OSError):
-            pass
+            checks += 1
         else:
-            raise AssertionError("FAKE_SOURCE_ACCEPTED")
-        xml = p / "partial.xml"
-        xml.write_text('<testsuite tests="1" failures="0" errors="0" skipped="0">'
-                       '<testcase classname="a" name="x"/></testsuite>', encoding="utf-8")
+            raise AssertionError("FAKE_SOURCE_DIR_PASSED")
+
+        # A self-contained Git repository with a TRACKED .gitignore:
+        # tests must catch both unexpected untracked and ignored input.
+        g = root / "git-fixture"
+        subprocess.run(["git", "init", "-q", str(g)], check=True)
+        (g / ".gitignore").write_text("pytest.ini\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(g), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(g), "-c", "user.name=ArioLab",
+                        "-c", "user.email=ario-lab@example.invalid",
+                        "commit", "-q", "-m", "fixture"], check=True)
+        git_clean(g)
+        for path, content in (("conftest.py", "def pytest_sessionstart(s): pass\n"),
+                              ("pytest.ini", "[pytest]\n")):
+            f = g / path
+            f.write_text(content, encoding="utf-8")
+            try:
+                git_clean(g)
+            except AssertionError:
+                checks += 1
+            else:
+                raise AssertionError("UNTRACKED_OR_IGNORED_FILE_ACCEPTED_" + path)
+            f.unlink()
+        git_clean(g)
+
+        tree = ET.parse(source_xml)
+        case = tree.getroot().find(".//testcase")
+        if case is None:
+            raise AssertionError("NO_JUNIT_CASE_FOR_SUBSTITUTION")
+        case.set("name", case.get("name", "") + "_SUBSTITUTED")
+        swap = root / "same-count.xml"
+        tree.write(swap, encoding="utf-8", xml_declaration=True)
         try:
-            upstream_junit_check(xml)
+            upstream_junit_check(swap)
         except AssertionError:
-            pass
+            checks += 1
         else:
-            raise AssertionError("TRUNCATED_TEST_COLLECTION_ACCEPTED")
-        old = p / "report.json"
-        old.write_text(json.dumps({"run_id": "1", "run_attempt": "1",
-                                  "outcome": "PASS_LAB_WITH_UPSTREAM_HOLDS",
-                                  "source_head": SOURCE_HEAD, "source_tree": SOURCE_TREE}))
+            raise AssertionError("SAME_COUNT_SWAPPED_ID_ACCEPTED")
+
+        few = root / "short.xml"
+        few.write_text('<testsuite tests="1" failures="0" errors="0" skipped="0">'
+                       '<testcase classname="x" name="one"/></testsuite>',
+                       encoding="utf-8")
         try:
-            validate_report(old, "1", "2")
+            upstream_junit_check(few)
         except AssertionError:
-            pass
+            checks += 1
         else:
-            raise AssertionError("OLD_ATTEMPT_REPORT_ACCEPTED")
+            raise AssertionError("SHORT_COLLECTION_ACCEPTED")
+
+        baseline = valid_example(upstream, "7", "1")
+        report = root / "sample.json"
+        def assert_result(value, expected_run="7", expected_attempt="1",
+                          must_pass=False):
+            report.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
+            try:
+                validate_report(report, expected_run, expected_attempt)
+            except (AssertionError, ValueError, TypeError, KeyError):
+                if must_pass:
+                    raise
+                return
+            if not must_pass:
+                raise AssertionError("CORRUPTED_OR_STALE_REPORT_PASSED")
+        assert_result(baseline, must_pass=True)
+        checks += 1
+        assert_result(baseline, expected_attempt="2")
+        assert_result(baseline, expected_run="8")
+        checks += 2
+
+        for problem in ("schema", "authority", "synthetic", "upstream",
+                        "case_ids", "race", "digest", "extra_key"):
+            bad = copy.deepcopy(baseline)
+            if problem == "schema":
+                bad["schema"] = "FAKE_SCHEMA"
+            elif problem == "authority":
+                bad["has_merge_authority"] = True
+            elif problem == "synthetic":
+                bad["synthetic"]["scenarios"][sorted(EXACT_ASSERTION_LABELS)[0]] = "FAIL"
+            elif problem == "upstream":
+                bad["upstream_holds"]["old_linked_green_new_same_head_queued"]["reproduced"] = False
+            elif problem == "case_ids":
+                bad["upstream_cases"]["case_ids"][0] += "_SWAPPED"
+                bad["upstream_cases"]["case_ids"].sort()
+            elif problem == "race":
+                bad["upstream_holds"]["last_sample_race"] = "COMPLETE"
+            elif problem == "digest":
+                bad["mutation_test"]["red_digest"] = "0" * 64
+            else:
+                bad["approved"] = True
+            assert_result(bad)
+            checks += 1
+    return {"falsification_assertions": checks, "result": "PASS_NEGATIVE_CONTROLS"}
+
 
 def red_green(impl: Path) -> dict:
     """Run actual new tests on the pinned OLD validator (RED), then CURRENT (GREEN)."""
@@ -408,8 +625,10 @@ def main() -> int:
                          sort_keys=True))
         return 0
     if args.self_test:
-        falsify_harness()
-        print('HARNESS_FAIL_CLOSED_CONTROLS_3_PASS')
+        if not args.upstream_junit:
+            raise SystemExit("REAL_SOURCE_JUNIT_REQUIRED_FOR_SELF_TEST")
+        controls = falsify_harness(Path(args.upstream_junit))
+        print("HARNESS_NEGATIVE_CONTROLS " + json.dumps(controls, sort_keys=True))
         return 0
     run_id, attempt = os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("GITHUB_RUN_ATTEMPT", "")
     if not run_id.isdecimal() or not attempt.isdecimal() or not args.output:

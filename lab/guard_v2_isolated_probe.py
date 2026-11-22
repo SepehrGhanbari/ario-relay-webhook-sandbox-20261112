@@ -225,7 +225,7 @@ def main() -> int:
         with Path(summary).open("a", encoding="utf-8") as f:
             f.write("## Ario Guard V2 isolated cloud rehearsal\n\n")
             f.write("**PASS_SYNTHETIC_ONLY — NO TRUST / NO MERGE / NO SIGNER**\n\n")
-            f.write(f"- Source HEAD: \`{SOURCE_HEAD}\`\n")
+            f.write(f"- Source HEAD: `{SOURCE_HEAD}`\n")
             f.write(f"- Synthetic scenarios: {report['synthetic']['count']} passed\n")
             f.write(f"- Mutation: {report['mutation_test']['red_summary']} → "
                     f"{report['mutation_test']['green_summary']}\n")

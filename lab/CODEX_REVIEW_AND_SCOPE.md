@@ -12,10 +12,10 @@ PR #295 SHA `14f9da37673b04f7fce90b720a94c27144c15667`
 and Git tree `d5a04b86b08dae838c0ddc80d5b1d02a0d467343`.
 If that branch is moved, the SHA check fails before running any Ario Python.
 
-No `secrets.*`, `GH_TOKEN`, `GITHUB_TOKEN`, `HF_TOKEN`,
-App private key, CODEOWNER approval, privileged API scope or CI Check
-publisher token is passed to the test process. Checkout does not
-persist credentials. `contents:read` is the only workflow permission.
+Checkout and setup-python receive a scoped, masked GitHub Actions token internally;
+checkout removes its persisted authorization header before Ario Python runs.
+No custom PAT, secret or writable token is passed to Ario Python. This does
+not mean zero authenticated GitHub reads in the entire job.
 The optional live probe does **unauthenticated public GET only** and
 reports `UNKNOWN` whether it succeeds or fails.
 
@@ -68,3 +68,10 @@ without editing `SepehrGhanbari/Ario` or any `main` branch:
 
 All results are source-bound synthetic research; the exact output should
 remain `PASS_SYNTHETIC_ONLY` or fail-closed, never `AUTHORIZED`.
+
+
+## Codex audit follow-up v0.2
+
+Exact JUnit identity and expected 42 failure IDs require a reviewed SHA-256 pin; the first run with the NOT_YET_PINNED sentinel MUST fail closed and print candidate digests for independent review. After freezing IDs, rerun from this same sandbox-only branch. Main Ario and all secrets remain untouched.
+
+The source is independently checked against the local actual Git SHA/tree in the harness (local object identity only). Previous stale report display is removed in favor of per-run-attempt exclusive report and success-only display. The original 14 groups reuse upstream fixtures and MUST NOT be represented as 14 independent mechanisms. Remaining upstream weaknesses in #295 are recorded as HOLD, not fixed by the sandbox harness. Pinned Node20 actions still emit deprecation warnings; transitive dependency closure remains mutable.
